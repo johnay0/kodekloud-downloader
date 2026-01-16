@@ -117,7 +117,7 @@ def download_course(
     """
     session = requests.Session()
     session_token = parse_token(cookie)
-    headers = {"authorization": f"bearer {session_token}"}
+    headers = {"Authorization": f"Bearer {session_token}"}
     params = {
         "course_id": course.id,
     }
