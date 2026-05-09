@@ -1,10 +1,15 @@
 import logging
 from pathlib import Path
-from typing import Union
+from typing import Optional, Union
 
 import click
 import validators
 
+from kodekloud_downloader.auth import (
+    DEFAULT_STATE_PATH,
+    KodekloudAuth,
+    LegacyCookieAuth,
+)
 from kodekloud_downloader.enums import Quality
 from kodekloud_downloader.helpers import select_courses
 from kodekloud_downloader.main import (
@@ -45,8 +50,32 @@ def kodekloud(verbose):
 @click.option(
     "--cookie",
     "-c",
-    required=True,
-    help="Cookie file. Course should be accessible via this.",
+    required=False,
+    default=None,
+    help=(
+        "Path to a Netscape cookie file (legacy mode). Either this OR "
+        "--email/--password is required. If both are given, email/password wins."
+    ),
+)
+@click.option(
+    "--email",
+    "-e",
+    envvar="KODEKLOUD_EMAIL",
+    default=None,
+    help="KodeKloud account email (env: KODEKLOUD_EMAIL).",
+)
+@click.option(
+    "--password",
+    "-p",
+    envvar="KODEKLOUD_PASSWORD",
+    default=None,
+    help="KodeKloud account password (env: KODEKLOUD_PASSWORD).",
+)
+@click.option(
+    "--auth-state",
+    default=str(DEFAULT_STATE_PATH),
+    show_default=True,
+    help="Where to cache the refresh token between runs.",
 )
 @click.option(
     "--max-duplicate-count",
@@ -59,16 +88,22 @@ def dl(
     course_url,
     quality: str,
     output_dir: Union[Path, str],
-    cookie,
+    cookie: Optional[str],
+    email: Optional[str],
+    password: Optional[str],
+    auth_state: str,
     max_duplicate_count: int,
 ):
+    auth = _build_auth(cookie, email, password, auth_state)
+
     if course_url is None:
         courses = collect_all_courses()
         selected_courses = select_courses(courses)
         for selected_course in selected_courses:
             download_course(
                 course=selected_course,
-                cookie=cookie,
+                auth=auth,
+                cookie_file=cookie,
                 quality=quality,
                 output_dir=output_dir,
                 max_duplicate_count=max_duplicate_count,
@@ -77,7 +112,8 @@ def dl(
         course_detail = parse_course_from_url(course_url)
         download_course(
             course=course_detail,
-            cookie=cookie,
+            auth=auth,
+            cookie_file=cookie,
             quality=quality,
             output_dir=output_dir,
             max_duplicate_count=max_duplicate_count,
@@ -85,6 +121,26 @@ def dl(
     else:
         logging.error("Please enter a valid URL")
         SystemExit(1)
+
+
+def _build_auth(
+    cookie: Optional[str],
+    email: Optional[str],
+    password: Optional[str],
+    auth_state: str,
+):
+    state_path = Path(auth_state)
+    if email and password:
+        return KodekloudAuth(email=email, password=password, state_path=state_path)
+    if state_path.exists():
+        return KodekloudAuth(email=email, password=password, state_path=state_path)
+    if cookie:
+        return LegacyCookieAuth(cookie)
+    raise click.UsageError(
+        "Authentication required. Provide either --email/--password "
+        "(env: KODEKLOUD_EMAIL / KODEKLOUD_PASSWORD) for automatic token "
+        "refresh, or --cookie pointing to a Netscape cookie file."
+    )
 
 
 @kodekloud.command()

@@ -1,19 +1,19 @@
 import logging
 from collections import defaultdict
 from pathlib import Path
-from typing import Union
+from typing import Optional, Union
 
 import markdownify
 import requests
 import yt_dlp
 from bs4 import BeautifulSoup
 
+from kodekloud_downloader.auth import KodekloudAuth, LegacyCookieAuth
 from kodekloud_downloader.helpers import (
     download_all_pdf,
     download_video,
     is_normal_content,
     normalize_name,
-    parse_token,
 )
 from kodekloud_downloader.models.course import CourseDetail
 from kodekloud_downloader.models.courses import Course
@@ -101,7 +101,8 @@ def parse_course_from_url(url: str) -> CourseDetail:
 
 def download_course(
     course: Union[Course, CourseDetail],
-    cookie: str,
+    auth: Union[KodekloudAuth, LegacyCookieAuth],
+    cookie_file: Optional[str],
     quality: str,
     output_dir: Union[str, Path],
     max_duplicate_count: int,
@@ -110,14 +111,13 @@ def download_course(
     Download a course from KodeKloud.
 
     :param course: The Course or CourseDetail object
-    :param cookie: The user's authentication cookie
+    :param auth: Auth handler that mints/refreshes session-cookie tokens.
+    :param cookie_file: Optional Netscape cookie file path, used by yt-dlp.
     :param quality: The video quality (e.g. "720p")
     :param output_dir: The output directory for the downloaded course
     :param max_duplicate_count: Maximum duplicate video before after cookie expire message will be raised
     """
     session = requests.Session()
-    session_token = parse_token(cookie)
-    headers = {"Authorization": f"Bearer {session_token}"}
     params = {
         "course_id": course.id,
     }
@@ -126,7 +126,7 @@ def download_course(
         fetch_course_detail(course.slug) if isinstance(course, Course) else course
     )
 
-    downloaded_videos = defaultdict(int)
+    downloaded_videos: defaultdict = defaultdict(int)
     for module_index, module in enumerate(course_detail.modules, start=1):
         for lesson_index, lesson in enumerate(module.lessons, start=1):
             file_path = create_file_path(
@@ -141,7 +141,7 @@ def download_course(
             if lesson.type == "video":
                 url = f"https://learn-api.kodekloud.com/api/lessons/{lesson.id}"
 
-                response = session.get(url, headers=headers, params=params)
+                response = _get_with_auth_retry(session, url, auth, params=params)
                 response.raise_for_status()
                 lesson_video_url = response.json()["video_url"]
                 # TODO: Maybe if in future KodeKloud change the video streaming service, this area will need some working.
@@ -158,11 +158,26 @@ def download_course(
                         "\nYour cookie might have expired or you don't have access/enrolled to the course."
                         "\nPlease refresh/regenerate the cookie or enroll in the course and try again."
                     )
-                download_video_lesson(current_video_url, file_path, cookie, quality)
+                download_video_lesson(current_video_url, file_path, cookie_file, quality)
                 downloaded_videos[current_video_url] += 1
             else:
                 lesson_url = f"https://learn.kodekloud.com/user/courses/{course.slug}/module/{module.id}/lesson/{lesson.id}"
-                download_resource_lesson(lesson_url, file_path, cookie)
+                download_resource_lesson(lesson_url, file_path, auth)
+
+
+def _get_with_auth_retry(
+    session: requests.Session,
+    url: str,
+    auth: Union[KodekloudAuth, LegacyCookieAuth],
+    params: Optional[dict] = None,
+) -> requests.Response:
+    """GET with current auth headers; on 401, force-refresh once and retry."""
+    response = session.get(url, headers=auth.get_auth_headers(), params=params)
+    if response.status_code == 401:
+        logger.info("Got 401 — forcing token refresh and retrying once")
+        auth.force_refresh()
+        response = session.get(url, headers=auth.get_auth_headers(), params=params)
+    return response
 
 
 def create_file_path(
@@ -194,14 +209,14 @@ def create_file_path(
 
 
 def download_video_lesson(
-    lesson_video_url, file_path: Path, cookie: str, quality: str
+    lesson_video_url, file_path: Path, cookie_file: Optional[str], quality: str
 ) -> None:
     """
     Download a video lesson.
 
     :param lesson_video_url: The lesson video URL
     :param file_path: The output file path for the video
-    :param cookie: The user's authentication cookie
+    :param cookie_file: Optional Netscape cookie file path passed to yt-dlp.
     :param quality: The video quality (e.g. "720p")
     """
     logger.info(f"Writing video file... {file_path}...")
@@ -211,7 +226,7 @@ def download_video_lesson(
         download_video(
             url=lesson_video_url,
             output_path=file_path,
-            cookie=cookie,
+            cookie=cookie_file,
             quality=quality,
         )
     except yt_dlp.utils.UnsupportedError as ex:
@@ -225,13 +240,15 @@ def download_video_lesson(
         )
 
 
-def download_resource_lesson(lesson_url, file_path: Path, cookie: str) -> None:
+def download_resource_lesson(
+    lesson_url, file_path: Path, auth: Union[KodekloudAuth, LegacyCookieAuth]
+) -> None:
     """
     Download a resource lesson.
 
     :param lesson_url: The lesson url
     :param file_path: The output file path for the resource
-    :param cookie: The user's authentication cookie
+    :param auth: Auth handler used to fetch authenticated resources.
     """
     # TODO: Did we break this? I have no idea.
     page = requests.get(lesson_url)
@@ -244,4 +261,4 @@ def download_resource_lesson(lesson_url, file_path: Path, cookie: str) -> None:
         file_path.with_suffix(".md").write_text(
             markdownify.markdownify(content.prettify()), encoding="utf-8"
         )
-        download_all_pdf(content=content, download_path=file_path.parent, cookie=cookie)
+        download_all_pdf(content=content, download_path=file_path.parent, auth=auth)
