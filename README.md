@@ -110,34 +110,157 @@ This will display the FFmpeg version and build information, confirming that the 
 
 
 
-## How to get cookie
-- Sign in to kodekloud.com
-- Download extension such as [Get cookies.txt LOCALLY](https://chrome.google.com/webstore/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc/related)
-- Download the cookie and save it in some location (You can name it something like `cookie.txt`).
+## 🔐 Authentication
+
+KodeKloud's API takes a Firebase **ID token**, which expires after about an hour.
+The downloader renews it on its own whenever it has a **refresh token** (from an
+email/password sign-in, a cookie or browser sign-in, or the cache from an earlier
+run) or your password. That means a long `--all-paid` download keeps going after
+the first hour.
+
+### Option 0: Email + password (recommended for long downloads / servers)
+
+```console
+export KODEKLOUD_EMAIL=you@example.com
+kodekloud dl -o . --all-paid          # prompts for the password once
+```
+
+The password can also come from `KODEKLOUD_PASSWORD` or `-p`. It is only sent to
+Google's Firebase sign-in endpoint and is never saved. The refresh token is cached
+in `~/.cache/kodekloud-downloader/auth.json` (mode `0600`), so later runs need no
+credentials at all (`--no-auth-cache` turns this off). If KodeKloud ever requires
+reCAPTCHA for password sign-in, use Option 1 or 2 once: they store a refresh token
+too, so renewal still works.
+
+### Option 1: Browser-based
+
+```console
+kodekloud dl --browser -o . "https://kodekloud.com/courses/..."
+```
+
+Auto-launches Chrome, you sign in once, and the token is extracted automatically.
+Requires `pip install "kodekloud-downloader[browser]"`.
+
+### Option 2: Cookie file
+
+Use [Get cookies.txt LOCALLY](https://chrome.google.com/webstore/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc/related)
+or a similar extension to export cookies after signing in at kodekloud.com.
+See [Authentication](#authentication-1) section below for detailed steps.
 
 ![](/static/cookie-demo.png)
 
 ## 💻 Installation
 
-To install kodekloud-downloader, simply run the following command:
-
 ```console
 pip install -U kodekloud-downloader
 ```
 
+For **automatic browser-based cookie extraction** (avoids manual cookie setup):
+
+```console
+pip install -U "kodekloud-downloader[browser]"
+```
+
 You can also install the latest main changes:
+
 ```console
 pip install -U git+https://github.com/debakarr/kodekloud-downloader.git
 ```
+
+## 🛠️ Development Setup
+
+### Prerequisites
+- Python 3.8 or higher
+- [uv](https://docs.astral.sh/uv/) (fast Python package manager)
+
+### Setup
+
+Clone the repository and install dependencies:
+
+```console
+git clone https://github.com/debakarr/kodekloud-downloader.git
+cd kodekloud-downloader
+uv sync --group dev
+```
+
+### Code Quality
+
+This project uses [Ruff](https://docs.astral.sh/ruff/) for linting and formatting:
+
+```console
+# Lint
+uv run ruff check src/ tests/
+
+# Format
+uv run ruff format src/ tests/
+```
+
+### Type Checking
+
+```console
+uv run mypy src/
+```
+
+### Running Tests
+
+```console
+uv run pytest --cov=src/
+```
+
+### Authentication
+
+#### Option A: Browser-based (recommended, automatic)
+
+If you installed with `[browser]` extras, use the `--browser` flag to extract the
+session token directly from your running Chrome browser:
+
+```console
+# 1. Start Chrome with remote debugging enabled:
+chrome.exe --remote-debugging-port=9222
+
+# 2. Sign in at https://learn.kodekloud.com
+
+# 3. Run the downloader:
+kodekloud dl --browser -o . "https://kodekloud.com/courses/..."
+```
+
+The tool connects to your running Chrome via the DevTools Protocol and extracts the
+HttpOnly `session-cookie` automatically. No manual cookie file editing needed.
+The `session-cookie` is refreshed ~every hour — just re-run with `--browser`.
+
+> **Environment variable**: You can set `KODEKLOUD_USE_BROWSER=1` to make
+> `--browser` the default behavior without passing the flag each time.
+
+#### Option B: Cookie file (lightweight, no extra deps)
+
+Export cookies from kodekloud.com after signing in. Use a browser extension like
+[Get cookies.txt LOCALLY](https://chrome.google.com/webstore/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc)
+and save to `kodekloud.com_cookies.txt`.
+
+KodeKloud uses an **HttpOnly session cookie** (`session-cookie`) for API auth.
+Standard export extensions cannot capture HttpOnly cookies, so you need to add it
+manually:
+
+1. Open DevTools (`F12`) on [learn.kodekloud.com](https://learn.kodekloud.com)
+2. Go to **Application** → **Storage** → **Cookies** → `https://learn.kodekloud.com`
+3. Find `session-cookie`, copy its **Value** (a long JWT token)
+4. Append this line to your cookie file (replace `<VALUE>`):
+   ```
+   .kodekloud.com	TRUE	/	TRUE	0	session-cookie	<VALUE>
+   ```
+
+The `session-cookie` expires after ~1 hour. When you get a 401 error, repeat steps 1-4.
+
+> **Tip**: Install with `[browser]` extras and use `--browser` to skip all manual steps.
 
 ## Try in Browser
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1GsgFcqa_43GYeDKmoa0CXsRfDySrzvzT?usp=sharing)
 
 ## 📚 Usage
 
-After installing the package, you can use the `kodekloud dl` command to download shows from the command line.
+After installing the package, you can use the `kodekloud dl` command to download courses:
 
-```css
+```console
 kodekloud dl --help
 Usage: kodekloud dl [OPTIONS] [COURSE_URL]
 
@@ -146,11 +269,60 @@ Options:
                                   Quality of the video to be downloaded.
   -o, --output-dir TEXT           Output directory where downloaded files will
                                   be store.
-  -c, --cookie TEXT               Cookie to download the courses.  [required]
+  -e, --email TEXT                KodeKloud account email. Enables automatic
+                                  token renewal (env: KODEKLOUD_EMAIL).
+  -p, --password TEXT             KodeKloud account password (env:
+                                  KODEKLOUD_PASSWORD). Prompted for if --email
+                                  is given without it. Never written to disk.
+  -c, --cookie TEXT               Cookie file exported from browser. Not
+                                  needed with --browser.
+  --browser                       Extract session token from running Chrome
+                                  (requires playwright).
+  -t, --token TEXT                Direct Firebase JWT authentication token
+                                  (env: KODEKLOUD_TOKEN).
+  --auth-state TEXT               Where the refresh token is cached (0600) so
+                                  later runs need no credentials. Env:
+                                  KODEKLOUD_AUTH_STATE.  [default:
+                                  ~/.cache/kodekloud-
+                                  downloader/auth.json]
+  --no-auth-cache                 Do not read or write the refresh-token
+                                  cache.
+  -mdc, --max-duplicate-count INTEGER
+                                  If same video is downloaded this many times,
+                                  then download stops
+  -s, --search TEXT               Filter course list by keyword (title,
+                                  instructor, or category).
+  -f, --filter, --category TEXT   Filter course list by category (e.g.
+                                  'Kubernetes', 'Security', 'Golden
+                                  Kubestronaut').
+  --plan TEXT                     Only list courses on these plans, comma-
+                                  separated (Free, Standard, Pro).
+  --all-paid                      Download every Standard and Pro course (Free
+                                  ones are skipped) without prompting. Combine
+                                  with -s/-f to narrow it down.
+  --dry-run                       With --all-paid: only list the courses that
+                                  would be downloaded.
   --help                          Show this message and exit.
 ```
 
 Here is an example:
+
+### 💰 Download every Standard and Pro course (skip Free)
+
+```console
+# See what would be downloaded (no login needed)
+kodekloud dl --all-paid --dry-run
+
+# Download all of them, unattended, with automatic token renewal
+kodekloud dl -o /data/kodekloud -e you@example.com --all-paid
+
+# Only part of the paid catalog
+kodekloud dl -o . -e you@example.com --all-paid -f "Kubernetes"
+```
+
+If one course fails, the rest still download, and the failed ones are listed at the end.
+Re-running skips videos and resources that are already on disk. `--plan Standard,Pro`
+applies the same plan filter to the interactive course picker.
 
 ### 🔍 Download entire course from list of available course in current folder
 
@@ -307,7 +479,10 @@ requests.exceptions.HTTPError: 403 Client Error: Forbidden for url
 
 ---
 
-If you are getting the below message while downloading course, make sure you regenerate your cookie.
+If you are getting a 401 error, your session token has expired.
+**Solutions** (preferred first):
+1. Use `kodekloud dl --browser` (automatically refreshes the token)
+2. Re-export your cookies and add the `session-cookie` manually (see 🔐 Authentication section)
 
 ```console
 requests.exceptions.HTTPError: 401 Client Error: Unauthorized for url

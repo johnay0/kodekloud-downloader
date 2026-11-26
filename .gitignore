@@ -131,6 +131,6 @@ dmypy.json
 # Session specific
 .vscode/
 KodeKloud/
-cookie*.txt
+*cookie*.txt
 KodeKloud_Quiz.md
 .claude
