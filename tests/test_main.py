@@ -1,8 +1,13 @@
+from unittest.mock import MagicMock, patch
+
+import pytest
+
 from kodekloud_downloader.main import (
     _MAX_PATH_LENGTH,
     _shorten_component,
     create_file_path,
 )
+from tests.conftest import FakeAuth
 
 
 def test_shorten_component_short_string():
@@ -125,7 +130,8 @@ def test_download_course_handles_401_gracefully():
                 quality="720p",
                 output_dir="/tmp/test",
                 max_duplicate_count=3,
-                session_token="invalid_token",
+                auth=FakeAuth("invalid_token"),
+                auto_enroll=False,
             )
         assert "401" in str(exc_info.value) or "expired" in str(exc_info.value).lower()
 
@@ -152,8 +158,7 @@ def test_download_resource_lesson_api_writes_markdown_and_downloads_resources(tm
         download_resource_lesson(
             lesson_url="https://learn.kodekloud.com/user/courses/test-slug/module/m1/lesson/lesson-art-1",
             file_path=file_path,
-            cookie=None,
-            session_token="valid_jwt",
+            auth=FakeAuth(),
             lesson_id="lesson-art-1",
             course_id="course-123",
         )
@@ -206,7 +211,8 @@ def test_download_course_handles_article_lessons(tmp_path):
             quality="720p",
             output_dir=tmp_path,
             max_duplicate_count=3,
-            session_token="valid_jwt",
+            auth=FakeAuth(),
+            auto_enroll=False,
         )
 
         assert mock_dl_res_lesson.called
@@ -257,7 +263,8 @@ def test_download_course_global_sequential_indexing(tmp_path):
             quality="720p",
             output_dir=tmp_path,
             max_duplicate_count=3,
-            session_token="valid_jwt",
+            auth=FakeAuth(),
+            auto_enroll=False,
         )
 
     assert len(captured_file_paths) == 4
@@ -303,9 +310,119 @@ def test_download_course_renews_token_on_401_and_retries(tmp_path):
             output_dir=tmp_path,
             max_duplicate_count=3,
             auth=auth,
+            auto_enroll=False,
         )
 
     assert auth.force_refresh.call_count == 1
     sent = [c.kwargs["headers"]["Authorization"] for c in session.get.call_args_list]
     assert sent == ["Bearer old", "Bearer new"]
     assert dl_video.called
+
+
+ENROLL_URL = "https://learn-api.kodekloud.com/api/users_progresses/enroll_course"
+PROGRESS_URL = "https://learn-api.kodekloud.com/api/users_progresses/courses/c-1"
+
+
+def _resp(status, payload=None):
+    r = MagicMock(status_code=status, ok=200 <= status < 300)
+    r.json.return_value = payload or {}
+    return r
+
+
+def test_ensure_enrolled_enrolls_when_not_enrolled():
+    from kodekloud_downloader.main import ensure_enrolled
+
+    session = MagicMock()
+    session.get.return_value = _resp(200, {"enrolled": False})
+    session.post.return_value = _resp(200, {})
+
+    assert ensure_enrolled(session, "c-1", "Course", FakeAuth("tok")) is True
+    assert session.get.call_args.args[0] == PROGRESS_URL
+    assert session.post.call_args.args[0] == ENROLL_URL
+    assert session.post.call_args.kwargs["json"] == {"courseId": "c-1"}
+    assert session.post.call_args.kwargs["headers"] == {"Authorization": "Bearer tok"}
+
+
+def test_ensure_enrolled_skips_when_already_enrolled():
+    from kodekloud_downloader.main import ensure_enrolled
+
+    session = MagicMock()
+    session.get.return_value = _resp(200, {"enrolled": True})
+
+    assert ensure_enrolled(session, "c-1", "Course", FakeAuth()) is False
+    assert not session.post.called
+
+
+def test_ensure_enrolled_tries_when_status_unknown_and_tolerates_refusal():
+    from kodekloud_downloader.main import ensure_enrolled
+
+    session = MagicMock()
+    session.get.return_value = _resp(404)
+    session.post.return_value = _resp(403, {"message": "plan required"})
+
+    assert ensure_enrolled(session, "c-1", "Course", FakeAuth()) is False
+    assert session.post.called
+
+
+def test_download_course_enrolls_before_downloading(tmp_path):
+    from kodekloud_downloader.main import download_course
+
+    course = MagicMock(id="c-1", slug="c", title="Course", modules=[])
+    with patch("requests.Session") as session_cls, patch(
+        "kodekloud_downloader.main.ensure_enrolled"
+    ) as enroll:
+        download_course(
+            course=course,
+            quality="720p",
+            output_dir=tmp_path,
+            max_duplicate_count=3,
+            auth=FakeAuth(),
+        )
+    enroll.assert_called_once_with(
+        session_cls.return_value, "c-1", "Course", enroll.call_args.args[3]
+    )
+
+
+def test_download_course_no_enroll_flag_skips_enrollment(tmp_path):
+    from kodekloud_downloader.main import download_course
+
+    course = MagicMock(id="c-1", slug="c", title="Course", modules=[])
+    with patch("requests.Session"), patch(
+        "kodekloud_downloader.main.ensure_enrolled"
+    ) as enroll:
+        download_course(
+            course=course,
+            quality="720p",
+            output_dir=tmp_path,
+            max_duplicate_count=3,
+            auth=FakeAuth(),
+            auto_enroll=False,
+        )
+    assert not enroll.called
+
+
+def test_download_course_403_raises_enrollment_error(tmp_path):
+    import requests
+
+    from kodekloud_downloader.main import EnrollmentError, download_course
+
+    lesson = MagicMock(id="l-1", title="Lesson 1", type="video")
+    module = MagicMock(id="m-1", title="Module 1", lessons=[lesson])
+    course = MagicMock(id="c-1", slug="c", title="Pro Course", modules=[module])
+
+    forbidden = _resp(403, {"message": "Enrollment is required"})
+    forbidden.raise_for_status.side_effect = requests.HTTPError(response=forbidden)
+
+    with patch("requests.Session") as session_cls:
+        session_cls.return_value.get.return_value = forbidden
+        with pytest.raises(
+            EnrollmentError, match=r"Pro Course.*Enrollment is required"
+        ):
+            download_course(
+                course=course,
+                quality="720p",
+                output_dir=tmp_path,
+                max_duplicate_count=3,
+                auth=FakeAuth(),
+                auto_enroll=False,
+            )

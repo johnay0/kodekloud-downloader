@@ -16,12 +16,16 @@ Please read the following disclaimer carefully before using the Downloader CLI T
 - [x] Download video lessons in selected quality
 - [x] Organizes downloaded content in a structured folder hierarchy
 - [x] Download resources (PDFs, etc.) alongside video lessons
+- [x] Sign in with email/password; the session renews itself, even on multi-day downloads
+- [x] Enrolls you in a course automatically before downloading it
+- [x] `--all-paid`: download every Standard and Pro course, skipping Free ones
 
 ---
 
 ## Prerequisites
 
-- **User need to enroll in the course before using the cli tool to download it**
+- A KodeKloud account with email/password sign-in and a plan that includes the
+  courses you want (you are enrolled automatically, see below)
 - Python 3.8 or higher
 - ffmpeg
 
@@ -112,42 +116,41 @@ This will display the FFmpeg version and build information, confirming that the 
 
 ## 🔐 Authentication
 
-KodeKloud's API takes a Firebase **ID token**, which expires after about an hour.
-The downloader renews it on its own whenever it has a **refresh token** (from an
-email/password sign-in, a cookie or browser sign-in, or the cache from an earlier
-run) or your password. That means a long `--all-paid` download keeps going after
-the first hour.
-
-### Option 0: Email + password (recommended for long downloads / servers)
+Sign in with your KodeKloud email and password:
 
 ```console
-export KODEKLOUD_EMAIL=you@example.com
-kodekloud dl -o . --all-paid          # prompts for the password once
+kodekloud dl -o . -e you@example.com      # prompts for the password once
+# or, for scripts/servers:
+export KODEKLOUD_EMAIL=you@example.com KODEKLOUD_PASSWORD='...'
+kodekloud dl -o . --all-paid
 ```
 
-The password can also come from `KODEKLOUD_PASSWORD` or `-p`. It is only sent to
-Google's Firebase sign-in endpoint and is never saved. The refresh token is cached
-in `~/.cache/kodekloud-downloader/auth.json` (mode `0600`), so later runs need no
-credentials at all (`--no-auth-cache` turns this off). If KodeKloud ever requires
-reCAPTCHA for password sign-in, use Option 1 or 2 once: they store a refresh token
-too, so renewal still works.
+- **Renewal:** KodeKloud's API tokens expire after about an hour. The
+  downloader renews them on its own (before they expire, and after any 401),
+  so long downloads keep running.
+- **Password:** it is only sent to Google's Firebase sign-in endpoint (the same
+  one the website uses) and is never written to disk.
+- **Saved session:** what is saved is the session's refresh token, in
+  `~/.cache/kodekloud-downloader/auth.json` (mode `0600`). Later runs need no
+  credentials at all. `--no-auth-cache` turns this off, and deleting the file
+  signs you out.
+- **Token safety:** your token is only ever sent to `https://*.kodekloud.com`,
+  never to third-party links found in lesson content.
 
-### Option 1: Browser-based
+## 🎓 Enrollment
 
-```console
-kodekloud dl --browser -o . "https://kodekloud.com/courses/..."
-```
+KodeKloud refuses to serve a course's lessons unless you are enrolled in it.
+The website enrolls you automatically when you open a lesson, and the
+downloader does the same before downloading each course:
 
-Auto-launches Chrome, you sign in once, and the token is extracted automatically.
-Requires `pip install "kodekloud-downloader[browser]"`.
-
-### Option 2: Cookie file
-
-Use [Get cookies.txt LOCALLY](https://chrome.google.com/webstore/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc/related)
-or a similar extension to export cookies after signing in at kodekloud.com.
-See [Authentication](#authentication-1) section below for detailed steps.
-
-![](/static/cookie-demo.png)
+- **Already enrolled:** it does nothing.
+- **Not enrolled:** it calls the same enroll endpoint the website uses. Those
+  courses show up under "My Courses" afterwards.
+- **No access:** if your plan does not include a course (for example a Pro
+  course on a Standard plan), the download stops with a clear "denied access"
+  message. With `--all-paid`, that course is listed as failed and the rest
+  continue.
+- **Opting out:** pass `--no-enroll` to never enroll automatically.
 
 ## 💻 Installation
 
@@ -155,16 +158,10 @@ See [Authentication](#authentication-1) section below for detailed steps.
 pip install -U kodekloud-downloader
 ```
 
-For **automatic browser-based cookie extraction** (avoids manual cookie setup):
-
-```console
-pip install -U "kodekloud-downloader[browser]"
-```
-
 You can also install the latest main changes:
 
 ```console
-pip install -U git+https://github.com/debakarr/kodekloud-downloader.git
+pip install -U git+https://github.com/johnay0/kodekloud-downloader.git
 ```
 
 ## 🛠️ Development Setup
@@ -178,7 +175,7 @@ pip install -U git+https://github.com/debakarr/kodekloud-downloader.git
 Clone the repository and install dependencies:
 
 ```console
-git clone https://github.com/debakarr/kodekloud-downloader.git
+git clone https://github.com/johnay0/kodekloud-downloader.git
 cd kodekloud-downloader
 uv sync --group dev
 ```
@@ -207,52 +204,6 @@ uv run mypy src/
 uv run pytest --cov=src/
 ```
 
-### Authentication
-
-#### Option A: Browser-based (recommended, automatic)
-
-If you installed with `[browser]` extras, use the `--browser` flag to extract the
-session token directly from your running Chrome browser:
-
-```console
-# 1. Start Chrome with remote debugging enabled:
-chrome.exe --remote-debugging-port=9222
-
-# 2. Sign in at https://learn.kodekloud.com
-
-# 3. Run the downloader:
-kodekloud dl --browser -o . "https://kodekloud.com/courses/..."
-```
-
-The tool connects to your running Chrome via the DevTools Protocol and extracts the
-HttpOnly `session-cookie` automatically. No manual cookie file editing needed.
-The `session-cookie` is refreshed ~every hour — just re-run with `--browser`.
-
-> **Environment variable**: You can set `KODEKLOUD_USE_BROWSER=1` to make
-> `--browser` the default behavior without passing the flag each time.
-
-#### Option B: Cookie file (lightweight, no extra deps)
-
-Export cookies from kodekloud.com after signing in. Use a browser extension like
-[Get cookies.txt LOCALLY](https://chrome.google.com/webstore/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc)
-and save to `kodekloud.com_cookies.txt`.
-
-KodeKloud uses an **HttpOnly session cookie** (`session-cookie`) for API auth.
-Standard export extensions cannot capture HttpOnly cookies, so you need to add it
-manually:
-
-1. Open DevTools (`F12`) on [learn.kodekloud.com](https://learn.kodekloud.com)
-2. Go to **Application** → **Storage** → **Cookies** → `https://learn.kodekloud.com`
-3. Find `session-cookie`, copy its **Value** (a long JWT token)
-4. Append this line to your cookie file (replace `<VALUE>`):
-   ```
-   .kodekloud.com	TRUE	/	TRUE	0	session-cookie	<VALUE>
-   ```
-
-The `session-cookie` expires after ~1 hour. When you get a 401 error, repeat steps 1-4.
-
-> **Tip**: Install with `[browser]` extras and use `--browser` to skip all manual steps.
-
 ## Try in Browser
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1GsgFcqa_43GYeDKmoa0CXsRfDySrzvzT?usp=sharing)
 
@@ -269,24 +220,23 @@ Options:
                                   Quality of the video to be downloaded.
   -o, --output-dir TEXT           Output directory where downloaded files will
                                   be store.
-  -e, --email TEXT                KodeKloud account email. Enables automatic
-                                  token renewal (env: KODEKLOUD_EMAIL).
+  -e, --email TEXT                KodeKloud account email (env:
+                                  KODEKLOUD_EMAIL). Only needed for the first
+                                  run; the session is cached and renewed
+                                  automatically.
   -p, --password TEXT             KodeKloud account password (env:
                                   KODEKLOUD_PASSWORD). Prompted for if --email
                                   is given without it. Never written to disk.
-  -c, --cookie TEXT               Cookie file exported from browser. Not
-                                  needed with --browser.
-  --browser                       Extract session token from running Chrome
-                                  (requires playwright).
-  -t, --token TEXT                Direct Firebase JWT authentication token
-                                  (env: KODEKLOUD_TOKEN).
-  --auth-state TEXT               Where the refresh token is cached (0600) so
+  --auth-state TEXT               Where the session (refresh token, never the
+                                  password) is cached with 0600 permissions so
                                   later runs need no credentials. Env:
                                   KODEKLOUD_AUTH_STATE.  [default:
                                   ~/.cache/kodekloud-
                                   downloader/auth.json]
-  --no-auth-cache                 Do not read or write the refresh-token
-                                  cache.
+  --no-auth-cache                 Do not read or write the session cache.
+  --no-enroll                     Do not auto-enroll in courses you are not
+                                  enrolled in yet (KodeKloud refuses lesson
+                                  downloads for those).
   -mdc, --max-duplicate-count INTEGER
                                   If same video is downloaded this many times,
                                   then download stops
@@ -313,7 +263,7 @@ Here is an example:
 # See what would be downloaded (no login needed)
 kodekloud dl --all-paid --dry-run
 
-# Download all of them, unattended, with automatic token renewal
+# Download all of them, unattended (auto sign-in renewal + auto-enroll)
 kodekloud dl -o /data/kodekloud -e you@example.com --all-paid
 
 # Only part of the paid catalog
@@ -327,7 +277,7 @@ applies the same plan filter to the interactive course picker.
 ### 🔍 Download entire course from list of available course in current folder
 
 ```css
-kodekloud dl -o . -c /path/to/cookie.txt
+kodekloud dl -o . -e you@example.com
 +-----+--------------------------------------------------------------------------------------+----------+------------------------------------------------------------------------------------------+
 | No. | Name                                                                                 | Type     | Categories                                                                               |
 +-----+--------------------------------------------------------------------------------------+----------+------------------------------------------------------------------------------------------+
@@ -467,23 +417,17 @@ To convert the quiz markdown to PDF you can use any online PDF converter like [a
 
 ## Colab Notebook to download directly in Personal GDrive
 
-You can open [this notebook](https://colab.research.google.com/drive/1GsgFcqa_43GYeDKmoa0CXsRfDySrzvzT?usp=sharing) with your google account were you want to download the course. Please note that you should open with the same account for which you want to link the drive.
+You can open [this notebook](https://colab.research.google.com/github/johnay0/kodekloud-downloader/blob/main/colab_notebook.ipynb) with your google account were you want to download the course. Please note that you should open with the same account for which you want to link the drive.
 
 ## Troubleshoot
 
-If you are getting the below message while downloading course, make sure you have the proper plan.
-
-```console
-requests.exceptions.HTTPError: 403 Client Error: Forbidden for url
-```
+If you see `KodeKloud denied access to '<course>'`, your plan does not include
+that course (or enrolling failed). Check the course on the website.
 
 ---
 
-If you are getting a 401 error, your session token has expired.
-**Solutions** (preferred first):
-1. Use `kodekloud dl --browser` (automatically refreshes the token)
-2. Re-export your cookies and add the `session-cookie` manually (see 🔐 Authentication section)
+If you see `Authentication failed (401 Unauthorized)` or `KodeKloud sign-in
+failed`, sign in again with `-e you@example.com` (wrong password, or the cached
+session was revoked, e.g. after a password change).
 
-```console
-requests.exceptions.HTTPError: 401 Client Error: Unauthorized for url
-```
+

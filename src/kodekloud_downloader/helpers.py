@@ -10,7 +10,7 @@ import prettytable
 import requests
 import yt_dlp
 
-from kodekloud_downloader.auth import AuthProvider, StaticTokenAuth, auth_headers
+from kodekloud_downloader.auth import AuthProvider, auth_headers
 from kodekloud_downloader.models.courses import Course
 
 logger = logging.getLogger(__name__)
@@ -342,7 +342,6 @@ def normalize_name(name: str) -> str:
 def download_video(
     url: str,
     output_path: Path,
-    cookie: Optional[str],
     quality: str,
 ) -> None:
     """
@@ -350,8 +349,6 @@ def download_video(
 
     :param url: The video URL
     :param output_path: The output directory for the downloaded video
-    :param cookie: The user's authentication cookie file path (None for
-        browser-based auth)
     :param quality: The video quality (e.g. "720p")
     """
     headers = {
@@ -369,8 +366,6 @@ def download_video(
         "writesubtitles": True,
         "http_headers": headers,
     }
-    if cookie is not None:
-        ydl_opts["cookiefile"] = cookie
     logger.debug(f"Calling download with following options: {ydl_opts}")
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download(url)
@@ -502,8 +497,6 @@ def _resolve_resource_filename(url: str, title: str = "") -> str:
 def download_all_resources(
     content: Any,
     download_path: Path,
-    cookie: Optional[str] = None,
-    session_token: Optional[str] = None,
     auth: Optional[AuthProvider] = None,
 ) -> List[Path]:
     """
@@ -515,9 +508,6 @@ def download_all_resources(
 
     :param content: Markdown string or BeautifulSoup element containing resource links
     :param download_path: The directory where downloaded resources will be saved
-    :param cookie: Unused; kept for backwards compatibility (it is a cookie
-        *file path*, never something to send as a header)
-    :param session_token: Optional static Bearer token (prefer ``auth``)
     :param auth: Optional self-renewing auth provider
     :return: List of Paths of downloaded files
     """
@@ -529,8 +519,6 @@ def download_all_resources(
 
     logger.info(f"Found {len(items)} downloadable resource(s) attached.")
     download_path.mkdir(parents=True, exist_ok=True)
-    if auth is None and session_token:
-        auth = StaticTokenAuth(session_token)
 
     for url, title in items:
         url = normalize_resource_url(url)
@@ -561,49 +549,3 @@ def download_all_resources(
             logger.warning(f"Failed to download resource from {url}: {ex}")
 
     return downloaded_files
-
-
-def download_all_pdf(
-    content: Any,
-    download_path: Path,
-    cookie: Optional[str] = None,
-    session_token: Optional[str] = None,
-) -> None:
-    """
-    Download all PDF files from the given content.
-    Retained for backwards compatibility; delegates to download_all_resources.
-    """
-    download_all_resources(
-        content=content,
-        download_path=download_path,
-        cookie=cookie,
-        session_token=session_token,
-    )
-
-
-def parse_token(cookiefile: str) -> Optional[str]:
-    """
-    Parse the session cookie from a file containing cookies.
-
-    :param cookiefile: The path to the file containing cookies.
-    :return: The value of the session cookie if found, otherwise None.
-    :raises FileNotFoundError: If the cookie file does not exist.
-    :raises IOError: If there is an error reading the file.
-    """
-    cookies = {}
-    try:
-        with open(cookiefile) as fp:
-            for line in fp:
-                # curl/yt-dlp style exports prefix HttpOnly cookies like this
-                if line.startswith("#HttpOnly_"):
-                    line = line[len("#HttpOnly_") :]
-                if line.strip() and not re.match(r"^\#", line):
-                    line_fields = line.strip().split("\t")
-                    if len(line_fields) > 6:
-                        cookies[line_fields[5]] = line_fields[6]
-    except FileNotFoundError:
-        raise FileNotFoundError(f"The file {cookiefile} does not exist.") from None
-    except OSError as e:
-        raise OSError(f"Error reading the file {cookiefile}: {e}") from e
-
-    return cookies.get("session-cookie") or cookies.get("_secure-user-session")

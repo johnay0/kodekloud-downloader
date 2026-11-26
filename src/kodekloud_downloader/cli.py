@@ -5,13 +5,7 @@ from typing import List, NoReturn, Optional, Union
 import click
 import validators
 
-from kodekloud_downloader.auth import (
-    DEFAULT_STATE_PATH,
-    AuthError,
-    FirebaseAuth,
-    TokenSource,
-    jwt_claims,
-)
+from kodekloud_downloader.auth import DEFAULT_STATE_PATH, AuthError, FirebaseAuth
 from kodekloud_downloader.enums import Quality
 from kodekloud_downloader.helpers import (
     PAID_PLANS,
@@ -22,6 +16,7 @@ from kodekloud_downloader.helpers import (
     select_courses,
 )
 from kodekloud_downloader.main import (
+    EnrollmentError,
     download_course,
     download_quiz,
     parse_course_from_url,
@@ -63,8 +58,8 @@ def kodekloud(verbose):
     envvar="KODEKLOUD_EMAIL",
     default=None,
     help=(
-        "KodeKloud account email. Enables automatic token renewal "
-        "(env: KODEKLOUD_EMAIL)."
+        "KodeKloud account email (env: KODEKLOUD_EMAIL). Only needed for the "
+        "first run; the session is cached and renewed automatically."
     ),
 )
 @click.option(
@@ -78,39 +73,30 @@ def kodekloud(verbose):
     ),
 )
 @click.option(
-    "--cookie",
-    "-c",
-    default=None,
-    help="Cookie file exported from browser. Not needed with --browser.",
-)
-@click.option(
-    "--browser",
-    is_flag=True,
-    default=False,
-    help="Extract session token from running Chrome (requires playwright).",
-)
-@click.option(
-    "--token",
-    "-t",
-    envvar="KODEKLOUD_TOKEN",
-    default=None,
-    help="Direct Firebase JWT authentication token (env: KODEKLOUD_TOKEN).",
-)
-@click.option(
     "--auth-state",
     envvar="KODEKLOUD_AUTH_STATE",
     default=str(DEFAULT_STATE_PATH),
     show_default=True,
     help=(
-        "Where the refresh token is cached (0600) so later runs need no "
-        "credentials. Env: KODEKLOUD_AUTH_STATE."
+        "Where the session (refresh token, never the password) is cached with "
+        "0600 permissions so later runs need no credentials. "
+        "Env: KODEKLOUD_AUTH_STATE."
     ),
 )
 @click.option(
     "--no-auth-cache",
     is_flag=True,
     default=False,
-    help="Do not read or write the refresh-token cache.",
+    help="Do not read or write the session cache.",
+)
+@click.option(
+    "--no-enroll",
+    is_flag=True,
+    default=False,
+    help=(
+        "Do not auto-enroll in courses you are not enrolled in yet "
+        "(KodeKloud refuses lesson downloads for those)."
+    ),
 )
 @click.option(
     "--max-duplicate-count",
@@ -163,11 +149,9 @@ def dl(
     output_dir: Union[Path, str],
     email: Optional[str],
     password: Optional[str],
-    cookie: Optional[str],
-    browser: bool,
-    token: Optional[str],
     auth_state: str,
     no_auth_cache: bool,
+    no_enroll: bool,
     max_duplicate_count: int,
     search: Optional[str],
     category_filter: Optional[str],
@@ -188,9 +172,6 @@ def dl(
         auth = _build_auth(
             email=email,
             password=password,
-            cookie=cookie,
-            browser=browser,
-            token=token,
             state_path=None if no_auth_cache else Path(auth_state),
         )
         _run_downloads(
@@ -198,14 +179,14 @@ def dl(
             course_url=course_url,
             quality=quality,
             output_dir=output_dir,
-            cookie=cookie,
+            auto_enroll=not no_enroll,
             max_duplicate_count=max_duplicate_count,
             search=search,
             category_filter=category_filter,
             plan_filter=plan_filter,
             all_paid=all_paid,
         )
-    except AuthError as e:
+    except (AuthError, EnrollmentError) as e:
         _fail(str(e))
 
 
@@ -215,92 +196,21 @@ def _fail(msg: str) -> NoReturn:
     raise SystemExit(1)
 
 
-def _is_firebase_id_token(raw_token: Optional[str]) -> bool:
-    """True for a Firebase ID token, False for a session cookie / garbage."""
-    if not raw_token or not raw_token.startswith("ey"):
-        return False
-    if len(raw_token.split(".")) != 3:
-        return False
-    iss = str(jwt_claims(raw_token).get("iss", ""))
-    return bool(iss) and "session.firebase" not in iss
-
-
 def _build_auth(
     email: Optional[str],
     password: Optional[str],
-    cookie: Optional[str],
-    browser: bool,
-    token: Optional[str],
     state_path: Optional[Path],
 ) -> FirebaseAuth:
-    """Turn whatever credentials were given into one self-renewing provider.
-
-    Every path ends in a FirebaseAuth so the ID token is renewed whenever a
-    refresh token (from password sign-in, cookie/browser exchange, or the
-    cache) or a password is available.
-    """
-    seed: Optional[dict] = None
-    fallback: Optional[TokenSource] = None
-
-    if token:
-        seed = {"id_token": token}
-        logging.info("Using session token provided via CLI")
-    elif browser:
-        from kodekloud_downloader.browser import get_session_tokens_from_browser
-
-        seed = get_session_tokens_from_browser(auto_launch=True)
-        if not seed:
-            _fail(
-                "Could not obtain session token from browser. "
-                "Make sure Chrome is running with --remote-debugging-port=9222 "
-                "and you are signed in to https://learn.kodekloud.com"
-            )
-        logging.info("Session token extracted from browser successfully")
-    elif cookie:
-        from kodekloud_downloader.browser import get_tokens_from_cookie_file
-        from kodekloud_downloader.helpers import parse_token
-
-        def _cookie_fallback() -> Optional[dict]:
-            # Session cookies outlive refresh failures; re-run the exchange.
-            return get_tokens_from_cookie_file(cookie)
-
-        fallback = _cookie_fallback
-
-        raw_token = parse_token(cookie)
-        if _is_firebase_id_token(raw_token):
-            seed = {"id_token": raw_token}
-        else:
-            logging.info("Resolving Firebase ID token from cookie file via browser...")
-            click.echo("Authenticating session from cookies...", err=True)
-            seed = get_tokens_from_cookie_file(cookie)
-            if not seed:
-                _fail(
-                    "Could not extract session token from cookie file. "
-                    "Make sure your cookie file contains valid session cookies, "
-                    "or try using --email / --browser / --token."
-                )
-            logging.info("Session token resolved successfully from cookies")
-
-    auth = FirebaseAuth(
-        email=email,
-        password=password,
-        state_path=state_path,
-        seed=seed,
-        fallback=fallback,
-    )
+    """Sign in with email/password, or reuse the cached session."""
+    auth = FirebaseAuth(email=email, password=password, state_path=state_path)
 
     if email and not password and not auth.has_refresh_token:
         auth.set_password(click.prompt("KodeKloud password", hide_input=True))
 
     if not auth.has_credentials:
         _fail(
-            "No credentials: use --email/--password (recommended, auto-renews), "
-            "--cookie, --browser, or --token"
-        )
-    if not auth.has_refresh_token and not auth.has_password:
-        logging.warning(
-            "No refresh token available: the session cannot be renewed when it "
-            "expires (~1h). Use --email/--password for long downloads."
+            "Not signed in: pass --email (and --password, or you will be "
+            "prompted), or set KODEKLOUD_EMAIL / KODEKLOUD_PASSWORD."
         )
 
     auth.get_token()  # fail fast on bad credentials
@@ -332,7 +242,7 @@ def _run_downloads(
     course_url: Optional[str],
     quality: str,
     output_dir: Union[Path, str],
-    cookie: Optional[str],
+    auto_enroll: bool,
     max_duplicate_count: int,
     search: Optional[str],
     category_filter: Optional[str],
@@ -343,7 +253,7 @@ def _run_downloads(
         "quality": quality,
         "output_dir": output_dir,
         "max_duplicate_count": max_duplicate_count,
-        "cookie": cookie,
+        "auto_enroll": auto_enroll,
         "auth": auth,
     }
 
@@ -358,12 +268,12 @@ def _run_downloads(
                 raise
             except Exception as e:  # keep going: one broken course != dead dump
                 logging.error("Failed to download %s: %s", course.title, e)
-                failed.append(course.title)
+                failed.append(f"{course.title}: {e}")
         click.echo(f"\nDone: {len(paid) - len(failed)}/{len(paid)} course(s).")
         if failed:
             click.echo("Failed (re-run to retry, finished files are skipped):")
-            for title in failed:
-                click.echo(f"  - {title}")
+            for line in failed:
+                click.echo(f"  - {line}")
             raise SystemExit(1)
         return
 

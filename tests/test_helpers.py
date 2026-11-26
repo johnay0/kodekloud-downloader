@@ -5,13 +5,13 @@ import pytest
 from bs4 import BeautifulSoup
 
 from kodekloud_downloader.helpers import (
-    download_all_pdf,
+    download_all_resources,
     download_video,
     normalize_name,
     parse_input,
-    parse_token,
     sanitize_filename,
 )
+from tests.conftest import FakeAuth
 
 
 def test_parse_input_single_number():
@@ -55,8 +55,8 @@ def test_normalize_name():
     assert normalize_name("Hello, World! #2026") == "Hello World 2026"
 
 
-def test_download_all_pdf_handles_tags_without_href(tmp_path: Path):
-    """Ensure download_all_pdf doesn't crash with AttributeError on <a> tags lacking href."""
+def test_download_all_resources_handles_tags_without_href(tmp_path: Path):
+    """Ensure <a> tags lacking href don't crash resource extraction."""
     html = """
     <div>
         <a>Anchor with no href</a>
@@ -67,11 +67,10 @@ def test_download_all_pdf_handles_tags_without_href(tmp_path: Path):
     soup = BeautifulSoup(html, "html.parser")
     with patch("requests.get") as mock_get:
         mock_resp = MagicMock()
-        mock_resp.content = b"%PDF-1.4 dummy content"
+        mock_resp.iter_content.return_value = [b"%PDF-1.4 dummy content"]
         mock_get.return_value = mock_resp
 
-        # This should NOT raise AttributeError: 'NoneType' object has no attribute 'endswith'
-        download_all_pdf(soup, tmp_path, cookie=None)
+        download_all_resources(soup, tmp_path)
 
         assert (tmp_path / "file.pdf").exists()
         assert (tmp_path / "file.pdf").read_bytes() == b"%PDF-1.4 dummy content"
@@ -83,18 +82,12 @@ def test_download_video_options_no_conflicting_subtitles():
         download_video(
             url="https://player.vimeo.com/video/12345",
             output_path=Path("/tmp/test_video"),
-            cookie=None,
             quality="720p",
         )
         assert mock_ydl.called
         opts = mock_ydl.call_args[0][0]
         assert opts.get("writesubtitles") is True
         assert "no_write_sub" not in opts or opts.get("no_write_sub") is not True
-
-
-def test_parse_token_missing_file():
-    with pytest.raises(FileNotFoundError):
-        parse_token("non_existent_cookie_file.txt")
 
 
 def test_download_all_resources_from_markdown(tmp_path: Path):
@@ -120,7 +113,7 @@ def test_download_all_resources_from_markdown(tmp_path: Path):
         downloaded = download_all_resources(
             content=md_content,
             download_path=tmp_path,
-            session_token="test_token",
+            auth=FakeAuth("test_token"),
         )
 
         assert len(downloaded) == 3
@@ -382,9 +375,7 @@ def test_download_all_resources_does_not_leak_token_to_third_parties(tmp_path: P
         mock_resp = MagicMock()
         mock_resp.iter_content.return_value = [b"x"]
         mock_get.return_value = mock_resp
-        download_all_resources(
-            md, tmp_path, cookie="cookies.txt", session_token="SECRET"
-        )
+        download_all_resources(md, tmp_path, auth=FakeAuth("SECRET"))
 
     sent = {c.args[0]: c.kwargs.get("headers", {}) for c in mock_get.call_args_list}
     assert sent["https://raw.githubusercontent.com/o/r/main/a.pdf"] == {}
@@ -392,16 +383,6 @@ def test_download_all_resources_does_not_leak_token_to_third_parties(tmp_path: P
     assert sent["https://learn-api.kodekloud.com/files/c.pdf"] == {
         "Authorization": "Bearer SECRET"
     }
-    # The cookie *file path* must never be sent as a Cookie header
-    assert all("Cookie" not in h for h in sent.values())
-
-
-def test_parse_token_reads_httponly_lines(tmp_path: Path):
-    f = tmp_path / "c.txt"
-    f.write_text(
-        "#HttpOnly_.kodekloud.com\tTRUE\t/\tTRUE\t0\t_secure-user-session\tv\n"
-    )
-    assert parse_token(str(f)) == "v"
 
 
 def test_filter_by_plan():
