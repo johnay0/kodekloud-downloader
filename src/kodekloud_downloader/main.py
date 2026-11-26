@@ -8,6 +8,7 @@ import requests
 import yt_dlp
 from bs4 import BeautifulSoup
 
+from kodekloud_downloader.auth import AuthProvider, StaticTokenAuth, auth_headers
 from kodekloud_downloader.helpers import (
     download_all_resources,
     download_video,
@@ -107,8 +108,9 @@ def download_course(
     quality: str,
     output_dir: Union[str, Path],
     max_duplicate_count: int,
-    session_token: str,
+    session_token: Optional[str] = None,
     cookie: Optional[str] = None,
+    auth: Optional[AuthProvider] = None,
 ) -> None:
     """
     Download a course from KodeKloud.
@@ -118,12 +120,16 @@ def download_course(
     :param output_dir: The output directory for the downloaded course
     :param max_duplicate_count: Maximum duplicate video before after cookie
         expire message will be raised
-    :param session_token: The Bearer token for API authentication
+    :param session_token: A static Bearer token (used when ``auth`` is None)
     :param cookie: Cookie file path for yt-dlp (video download). Not needed
         when using --browser mode (playwright handles auth).
+    :param auth: Self-renewing auth provider; preferred over ``session_token``
     """
+    if auth is None:
+        if not session_token:
+            raise ValueError("download_course needs either auth or session_token")
+        auth = StaticTokenAuth(session_token)
     session = requests.Session()
-    headers = {"authorization": f"Bearer {session_token}"}
     params = {
         "course_id": course.id,
     }
@@ -149,17 +155,7 @@ def download_course(
             if lesson.type == "video":
                 url = f"https://learn-api.kodekloud.com/api/lessons/{lesson.id}"
 
-                try:
-                    response = session.get(url, headers=headers, params=params)
-                    response.raise_for_status()
-                except requests.exceptions.HTTPError as ex:
-                    if ex.response is not None and ex.response.status_code == 401:
-                        raise SystemExit(
-                            "Authentication failed (401 Unauthorized). "
-                            "Your session token may have expired or is invalid. "
-                            "Please refresh your cookies or use --browser / --token."
-                        ) from None
-                    raise
+                response = _api_get(session, url, auth, params=params)
 
                 lesson_data = response.json()
                 lesson_video_url = lesson_data["video_url"]
@@ -188,8 +184,7 @@ def download_course(
                     download_all_resources(
                         video_content,
                         download_path=file_path.parent,
-                        cookie=cookie,
-                        session_token=session_token,
+                        auth=auth,
                     )
             else:
                 lesson_url = f"https://learn.kodekloud.com/user/courses/{course.slug}/module/{module.id}/lesson/{lesson.id}"
@@ -197,10 +192,36 @@ def download_course(
                     lesson_url,
                     file_path,
                     cookie,
-                    session_token=session_token,
                     lesson_id=lesson.id,
                     course_id=course.id,
+                    auth=auth,
                 )
+
+
+_AUTH_FAILED_MSG = (
+    "Authentication failed (401 Unauthorized) and the session could not be "
+    "renewed. Use --email/--password (auto-renews), or refresh your cookies / "
+    "--browser / --token."
+)
+
+
+def _api_get(
+    session: requests.Session,
+    url: str,
+    auth: AuthProvider,
+    params: Optional[dict] = None,
+) -> requests.Response:
+    """GET a learn-api URL; on 401 renew the token once and retry."""
+    response = session.get(url, headers=auth_headers(auth, url), params=params)
+    if response.status_code == 401:
+        logger.info("Got 401 from KodeKloud API, renewing session token...")
+        if not auth.force_refresh():
+            raise SystemExit(_AUTH_FAILED_MSG)
+        response = session.get(url, headers=auth_headers(auth, url), params=params)
+        if response.status_code == 401:
+            raise SystemExit(_AUTH_FAILED_MSG)
+    response.raise_for_status()
+    return response
 
 
 # Maximum safe path length (Windows MAX_PATH is 260, leave room for
@@ -312,22 +333,24 @@ def download_resource_lesson(
     session_token: Optional[str] = None,
     lesson_id: Optional[str] = None,
     course_id: Optional[str] = None,
+    auth: Optional[AuthProvider] = None,
 ) -> None:
     """
     Download a resource lesson (article notes, presentation decks, or attachments).
 
     :param lesson_url: The lesson web URL
     :param file_path: The output file path for the resource
-    :param cookie: The user's authentication cookie
-    :param session_token: The user's Bearer authentication token
+    :param cookie: Unused; kept for backwards compatibility (cookie file path)
+    :param session_token: Static Bearer token (used when ``auth`` is None)
     :param lesson_id: Optional lesson ID (extracted from lesson_url if omitted)
     :param course_id: Optional course ID
+    :param auth: Self-renewing auth provider; preferred over ``session_token``
     """
-    headers: dict = {}
-    if session_token:
-        headers["Authorization"] = f"Bearer {session_token}"
-    if cookie is not None:
-        headers["Cookie"] = cookie
+    if auth is None and session_token:
+        auth = StaticTokenAuth(session_token)
+
+    def _headers(url: str) -> dict:
+        return auth_headers(auth, url) if auth is not None else {}
 
     # Extract lesson_id if not explicitly provided
     if not lesson_id and "/lesson/" in lesson_url:
@@ -340,7 +363,13 @@ def download_resource_lesson(
         api_url = f"https://learn-api.kodekloud.com/api/lessons/{lesson_id}"
         params = {"course_id": course_id} if course_id else {}
         try:
-            resp = requests.get(api_url, headers=headers, params=params, timeout=30)
+            resp = requests.get(
+                api_url, headers=_headers(api_url), params=params, timeout=30
+            )
+            if resp.status_code == 401 and auth is not None and auth.force_refresh():
+                resp = requests.get(
+                    api_url, headers=_headers(api_url), params=params, timeout=30
+                )
             if resp.status_code == 200:
                 data = resp.json()
                 content_markdown = data.get("content")
@@ -350,7 +379,7 @@ def download_resource_lesson(
     # 2. Fall back to scraping lesson_url if API did not return content
     if content_markdown is None:
         try:
-            page = requests.get(lesson_url, headers=headers, timeout=30)
+            page = requests.get(lesson_url, headers=_headers(lesson_url), timeout=30)
             soup = BeautifulSoup(page.content, "html.parser")
             content_elem = soup.find("div", class_="learndash_content_wrap")
             if content_elem and is_normal_content(content_elem):
@@ -367,8 +396,7 @@ def download_resource_lesson(
         downloaded = download_all_resources(
             content=content_markdown,
             download_path=file_path.parent,
-            cookie=cookie,
-            session_token=session_token,
+            auth=auth,
         )
         if not downloaded:
             logger.info(

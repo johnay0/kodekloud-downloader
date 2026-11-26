@@ -4,12 +4,13 @@ import string
 import urllib.parse
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, List, Optional, Set, Tuple, Union, cast
+from typing import Any, List, Optional, Sequence, Set, Tuple, Union, cast
 
 import prettytable
 import requests
 import yt_dlp
 
+from kodekloud_downloader.auth import AuthProvider, StaticTokenAuth, auth_headers
 from kodekloud_downloader.models.courses import Course
 
 logger = logging.getLogger(__name__)
@@ -147,6 +148,27 @@ def _filter_courses(
         if q in title or q in slug or q in instructors or q in categories:
             matches.append((idx, course))
     return matches
+
+
+PAID_PLANS: Tuple[str, ...] = ("Standard", "Pro")
+
+
+def filter_by_plan(
+    courses: List[Course], plans: Union[str, Sequence[str]]
+) -> List[Course]:
+    """Keep only courses whose plan (Free/Standard/Pro) is in ``plans``.
+
+    :param courses: Courses to filter.
+    :param plans: Plan names, as a list or a comma-separated string
+        (case-insensitive), e.g. ``"Standard,Pro"``.
+    :return: Matching courses, in their original order.
+    """
+    if isinstance(plans, str):
+        plans = plans.split(",")
+    wanted = {p.strip().lower() for p in plans if p.strip()}
+    if not wanted:
+        return list(courses)
+    return [c for c in courses if (c.plan or "").strip().lower() in wanted]
 
 
 def select_courses(
@@ -482,14 +504,21 @@ def download_all_resources(
     download_path: Path,
     cookie: Optional[str] = None,
     session_token: Optional[str] = None,
+    auth: Optional[AuthProvider] = None,
 ) -> List[Path]:
     """
     Download all resources (PDFs, archives, documents, etc.) from the given content.
 
+    Lesson content links to many third-party hosts (GitHub, S3, Google Drive,
+    ...). The KodeKloud token is only attached to https://*.kodekloud.com URLs
+    so it is never leaked to those hosts.
+
     :param content: Markdown string or BeautifulSoup element containing resource links
     :param download_path: The directory where downloaded resources will be saved
-    :param cookie: The user's authentication cookie
-    :param session_token: Optional Bearer session token for authenticated downloads
+    :param cookie: Unused; kept for backwards compatibility (it is a cookie
+        *file path*, never something to send as a header)
+    :param session_token: Optional static Bearer token (prefer ``auth``)
+    :param auth: Optional self-renewing auth provider
     :return: List of Paths of downloaded files
     """
     downloaded_files: List[Path] = []
@@ -500,11 +529,8 @@ def download_all_resources(
 
     logger.info(f"Found {len(items)} downloadable resource(s) attached.")
     download_path.mkdir(parents=True, exist_ok=True)
-    headers: dict = {}
-    if session_token:
-        headers["Authorization"] = f"Bearer {session_token}"
-    elif cookie is not None:
-        headers["Cookie"] = cookie
+    if auth is None and session_token:
+        auth = StaticTokenAuth(session_token)
 
     for url, title in items:
         url = normalize_resource_url(url)
@@ -518,6 +544,7 @@ def download_all_resources(
 
         logger.info(f"Downloading resource: {file_name} from {url}...")
         try:
+            headers = auth_headers(auth, url) if auth is not None else {}
             resp = requests.get(url, headers=headers, stream=True, timeout=60)
             resp.raise_for_status()
             with open(target_path, "wb") as f:
@@ -567,6 +594,9 @@ def parse_token(cookiefile: str) -> Optional[str]:
     try:
         with open(cookiefile) as fp:
             for line in fp:
+                # curl/yt-dlp style exports prefix HttpOnly cookies like this
+                if line.startswith("#HttpOnly_"):
+                    line = line[len("#HttpOnly_") :]
                 if line.strip() and not re.match(r"^\#", line):
                     line_fields = line.strip().split("\t")
                     if len(line_fields) > 6:
