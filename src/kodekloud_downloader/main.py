@@ -8,7 +8,7 @@ import requests
 import yt_dlp
 from bs4 import BeautifulSoup
 
-from kodekloud_downloader.auth import AuthProvider, StaticTokenAuth, auth_headers
+from kodekloud_downloader.auth import AuthProvider, auth_headers
 from kodekloud_downloader.helpers import (
     download_all_resources,
     download_video,
@@ -21,6 +21,12 @@ from kodekloud_downloader.models.helper import fetch_course_detail
 from kodekloud_downloader.models.quiz import Quiz
 
 logger = logging.getLogger(__name__)
+
+API_BASE = "https://learn-api.kodekloud.com/api"
+
+
+class EnrollmentError(Exception):
+    """KodeKloud refuses access to a course (not enrolled / plan too low)."""
 
 
 def download_quiz(output_dir: Union[str, Path], sep: bool) -> None:
@@ -108,9 +114,8 @@ def download_course(
     quality: str,
     output_dir: Union[str, Path],
     max_duplicate_count: int,
-    session_token: Optional[str] = None,
-    cookie: Optional[str] = None,
-    auth: Optional[AuthProvider] = None,
+    auth: AuthProvider,
+    auto_enroll: bool = True,
 ) -> None:
     """
     Download a course from KodeKloud.
@@ -118,18 +123,15 @@ def download_course(
     :param course: The Course or CourseDetail object
     :param quality: The video quality (e.g. "720p")
     :param output_dir: The output directory for the downloaded course
-    :param max_duplicate_count: Maximum duplicate video before after cookie
-        expire message will be raised
-    :param session_token: A static Bearer token (used when ``auth`` is None)
-    :param cookie: Cookie file path for yt-dlp (video download). Not needed
-        when using --browser mode (playwright handles auth).
-    :param auth: Self-renewing auth provider; preferred over ``session_token``
+    :param max_duplicate_count: Stop if the same video URL comes back more
+        than this many times (a sign of missing access)
+    :param auth: Self-renewing auth provider (see kodekloud_downloader.auth)
+    :param auto_enroll: Enroll in the course first if not enrolled yet
+    :raises EnrollmentError: If KodeKloud denies access to the course
     """
-    if auth is None:
-        if not session_token:
-            raise ValueError("download_course needs either auth or session_token")
-        auth = StaticTokenAuth(session_token)
     session = requests.Session()
+    if auto_enroll:
+        ensure_enrolled(session, course.id, course.title, auth)
     params = {
         "course_id": course.id,
     }
@@ -155,10 +157,24 @@ def download_course(
             if lesson.type == "video":
                 url = f"https://learn-api.kodekloud.com/api/lessons/{lesson.id}"
 
-                response = _api_get(session, url, auth, params=params)
+                try:
+                    response = _api_get(session, url, auth, params=params)
+                except requests.HTTPError as ex:
+                    status = ex.response.status_code if ex.response is not None else 0
+                    if status in (402, 403):
+                        raise EnrollmentError(
+                            _access_denied_msg(course.title, ex)
+                        ) from None
+                    raise
 
                 lesson_data = response.json()
-                lesson_video_url = lesson_data["video_url"]
+                lesson_video_url = lesson_data.get("video_url")
+                if not lesson_video_url:
+                    raise EnrollmentError(
+                        f"KodeKloud returned no video for '{lesson.title}' in "
+                        f"'{course.title}'. You are probably not enrolled, or "
+                        "your plan does not include this course."
+                    )
                 # TODO: Maybe if in future KodeKloud change the video streaming
                 # service, this area will need some working.
                 # Try to generalize this for future enhancement?
@@ -171,12 +187,11 @@ def download_course(
                 ):
                     raise SystemExit(
                         f"The following video is downloaded more than "
-                        f"{max_duplicate_count}.\nYour cookie might have "
-                        "expired or you don't have access/enrolled to the "
-                        "course.\nPlease refresh/regenerate the cookie or "
-                        "enroll in the course and try again."
+                        f"{max_duplicate_count}.\nYou may not have access to, "
+                        "or be enrolled in, this course.\nPlease enroll in the "
+                        "course and try again."
                     )
-                download_video_lesson(current_video_url, file_path, cookie, quality)
+                download_video_lesson(current_video_url, file_path, quality)
                 downloaded_videos[current_video_url] += 1
 
                 video_content = lesson_data.get("content")
@@ -191,7 +206,6 @@ def download_course(
                 download_resource_lesson(
                     lesson_url,
                     file_path,
-                    cookie,
                     lesson_id=lesson.id,
                     course_id=course.id,
                     auth=auth,
@@ -200,9 +214,28 @@ def download_course(
 
 _AUTH_FAILED_MSG = (
     "Authentication failed (401 Unauthorized) and the session could not be "
-    "renewed. Use --email/--password (auto-renews), or refresh your cookies / "
-    "--browser / --token."
+    "renewed. Sign in again with --email/--password."
 )
+
+
+def _api_request(
+    session: requests.Session,
+    method: str,
+    url: str,
+    auth: AuthProvider,
+    **kwargs,
+) -> requests.Response:
+    """Call a learn-api URL; on 401 renew the token once and retry."""
+    send = getattr(session, method)
+    response = send(url, headers=auth_headers(auth, url), timeout=30, **kwargs)
+    if response.status_code == 401:
+        logger.info("Got 401 from KodeKloud API, renewing session token...")
+        if not auth.force_refresh():
+            raise SystemExit(_AUTH_FAILED_MSG)
+        response = send(url, headers=auth_headers(auth, url), timeout=30, **kwargs)
+        if response.status_code == 401:
+            raise SystemExit(_AUTH_FAILED_MSG)
+    return response
 
 
 def _api_get(
@@ -211,17 +244,73 @@ def _api_get(
     auth: AuthProvider,
     params: Optional[dict] = None,
 ) -> requests.Response:
-    """GET a learn-api URL; on 401 renew the token once and retry."""
-    response = session.get(url, headers=auth_headers(auth, url), params=params)
-    if response.status_code == 401:
-        logger.info("Got 401 from KodeKloud API, renewing session token...")
-        if not auth.force_refresh():
-            raise SystemExit(_AUTH_FAILED_MSG)
-        response = session.get(url, headers=auth_headers(auth, url), params=params)
-        if response.status_code == 401:
-            raise SystemExit(_AUTH_FAILED_MSG)
+    response = _api_request(session, "get", url, auth, params=params)
     response.raise_for_status()
     return response
+
+
+def _error_message(response: Optional[requests.Response]) -> str:
+    if response is None:
+        return ""
+    try:
+        data = response.json()
+        msg = data.get("message") or data.get("error") or ""
+    except (ValueError, AttributeError):
+        msg = ""
+    return f"HTTP {response.status_code}" + (f": {msg}" if msg else "")
+
+
+def _access_denied_msg(course_title: str, ex: requests.HTTPError) -> str:
+    return (
+        f"KodeKloud denied access to '{course_title}' "
+        f"({_error_message(ex.response)}). You are probably not enrolled, or "
+        "your plan does not include this course."
+    )
+
+
+def ensure_enrolled(
+    session: requests.Session,
+    course_id: str,
+    course_title: str,
+    auth: AuthProvider,
+) -> bool:
+    """Enroll in a course if not enrolled yet, like the web app does.
+
+    The learn site auto-enrolls you when you open a lesson of a course you
+    are not enrolled in; lesson downloads are refused otherwise. This mirrors
+    that: check ``users_progresses/courses/{id}`` and, if ``enrolled`` is
+    not true, ``POST users_progresses/enroll_course``.
+
+    :return: True if this call enrolled you, False if you already were (or
+        enrolling failed, which is only logged: a real lack of access then
+        surfaces as an EnrollmentError on the first lesson).
+    """
+    progress_url = f"{API_BASE}/users_progresses/courses/{course_id}"
+    try:
+        resp = _api_request(session, "get", progress_url, auth)
+        if resp.status_code == 200 and resp.json().get("enrolled") is True:
+            logger.debug("Already enrolled in %s", course_title)
+            return False
+    except (requests.RequestException, ValueError, AttributeError) as ex:
+        logger.debug("Could not read enrollment status of %s: %s", course_title, ex)
+
+    enroll_url = f"{API_BASE}/users_progresses/enroll_course"
+    try:
+        resp = _api_request(
+            session, "post", enroll_url, auth, json={"courseId": course_id}
+        )
+    except requests.RequestException as ex:
+        logger.warning("Could not enroll in %s: %s", course_title, ex)
+        return False
+    if resp.ok:
+        logger.info("Enrolled in %s", course_title)
+        return True
+    logger.warning(
+        "KodeKloud did not enroll you in %s (%s); trying to download anyway.",
+        course_title,
+        _error_message(resp),
+    )
+    return False
 
 
 # Maximum safe path length (Windows MAX_PATH is 260, leave room for
@@ -293,7 +382,6 @@ def create_file_path(
 def download_video_lesson(
     lesson_video_url,
     file_path: Path,
-    cookie: Optional[str],
     quality: str,
 ) -> None:
     """
@@ -301,7 +389,6 @@ def download_video_lesson(
 
     :param lesson_video_url: The lesson video URL
     :param file_path: The output file path for the video
-    :param cookie: The user's authentication cookie
     :param quality: The video quality (e.g. "720p")
     """
     logger.info(f"Writing video file... {file_path}...")
@@ -311,7 +398,6 @@ def download_video_lesson(
         download_video(
             url=lesson_video_url,
             output_path=file_path,
-            cookie=cookie,
             quality=quality,
         )
     except yt_dlp.utils.UnsupportedError:
@@ -329,8 +415,6 @@ def download_video_lesson(
 def download_resource_lesson(
     lesson_url: str,
     file_path: Path,
-    cookie: Optional[str] = None,
-    session_token: Optional[str] = None,
     lesson_id: Optional[str] = None,
     course_id: Optional[str] = None,
     auth: Optional[AuthProvider] = None,
@@ -340,14 +424,10 @@ def download_resource_lesson(
 
     :param lesson_url: The lesson web URL
     :param file_path: The output file path for the resource
-    :param cookie: Unused; kept for backwards compatibility (cookie file path)
-    :param session_token: Static Bearer token (used when ``auth`` is None)
     :param lesson_id: Optional lesson ID (extracted from lesson_url if omitted)
     :param course_id: Optional course ID
-    :param auth: Self-renewing auth provider; preferred over ``session_token``
+    :param auth: Self-renewing auth provider
     """
-    if auth is None and session_token:
-        auth = StaticTokenAuth(session_token)
 
     def _headers(url: str) -> dict:
         return auth_headers(auth, url) if auth is not None else {}

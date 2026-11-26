@@ -1,4 +1,3 @@
-import base64
 import json
 import os
 import stat
@@ -12,18 +11,10 @@ from kodekloud_downloader.auth import (
     SIGN_IN_URL,
     AuthError,
     FirebaseAuth,
-    StaticTokenAuth,
     auth_headers,
     is_kodekloud_url,
-    jwt_expiry,
 )
-
-
-def _jwt(**claims) -> str:
-    def enc(d):
-        return base64.urlsafe_b64encode(json.dumps(d).encode()).decode().rstrip("=")
-
-    return f"{enc({'alg': 'RS256'})}.{enc(claims)}.sig"
+from tests.conftest import FakeAuth
 
 
 def _resp(status=200, payload=None):
@@ -56,16 +47,11 @@ def test_is_kodekloud_url(url, expected):
 
 
 def test_auth_headers_never_sent_to_third_parties():
-    auth = StaticTokenAuth("secret")
+    auth = FakeAuth("secret")
     assert auth_headers(auth, "https://github.com/x/y.zip") == {}
     assert auth_headers(auth, "https://learn-api.kodekloud.com/api") == {
         "Authorization": "Bearer secret"
     }
-
-
-def test_jwt_expiry():
-    assert jwt_expiry(_jwt(exp=1234)) == 1234.0
-    assert jwt_expiry("garbage") is None
 
 
 def test_password_sign_in_caches_refresh_token_securely(tmp_path):
@@ -137,20 +123,6 @@ def test_sign_in_error_is_explained(tmp_path):
             auth.get_token()
 
 
-def test_force_refresh_without_any_credentials_returns_false():
-    auth = FirebaseAuth(state_path=None, seed={"id_token": "tok"})
-    assert auth.get_token() == "tok"  # unknown expiry: used until a 401
-    assert auth.force_refresh() is False
-
-
-def test_fallback_source_used_when_refresh_unavailable():
-    fallback = MagicMock(return_value={"id_token": "id-fb", "refresh_token": "rt-fb"})
-    auth = FirebaseAuth(state_path=None, seed={"id_token": "tok"}, fallback=fallback)
-    assert auth.force_refresh() is True
-    assert auth.get_token() == "id-fb"
-    assert auth.has_refresh_token
-
-
 def test_legacy_cache_format_is_migrated(tmp_path):
     state = tmp_path / "auth.json"
     state.write_text(
@@ -173,15 +145,23 @@ def test_cache_of_other_account_is_ignored(tmp_path):
     auth = FirebaseAuth(email="a@x.com", state_path=state)
     assert not auth.has_refresh_token
 
-    token = _jwt(email="a@x.com", exp=time.time() + 3600)
-    auth = FirebaseAuth(state_path=state, seed={"id_token": token})
-    assert not auth.has_refresh_token
+
+def test_cached_session_needs_no_credentials(tmp_path):
+    state = tmp_path / "auth.json"
+    state.write_text(json.dumps({"refresh_token": "rt", "email": "a@x.com"}))
+    auth = FirebaseAuth(state_path=state)
+    assert auth.has_credentials
+    assert auth.email == "a@x.com"
+
+
+def test_no_cache_no_password_cannot_sign_in():
+    auth = FirebaseAuth(email="a@x.com", state_path=None)
+    assert not auth.has_credentials
+    with pytest.raises(AuthError):
+        auth.get_token()
+    assert auth.force_refresh() is False
 
 
 def test_repr_hides_secrets():
     auth = FirebaseAuth(email="a@x.com", password="hunter2", state_path=None)
     assert "hunter2" not in repr(auth)
-
-
-def test_static_token_cannot_refresh():
-    assert StaticTokenAuth("t").force_refresh() is False
