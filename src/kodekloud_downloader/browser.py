@@ -135,6 +135,9 @@ def _launch_chrome_with_debugging(port: int) -> Optional[subprocess.Popen]:
 def parse_netscape_cookies(cookiefile: str | Path) -> list[dict]:
     """Parse a Netscape format cookie file into a list of dicts suitable for Playwright.
 
+    Only kodekloud.com cookies are returned, so an "export all cookies" file
+    never hands unrelated sessions to the headless browser.
+
     :param cookiefile: Path to the cookie file.
     :return: List of cookie dictionaries for context.add_cookies().
     """
@@ -142,10 +145,16 @@ def parse_netscape_cookies(cookiefile: str | Path) -> list[dict]:
     with open(cookiefile) as fp:
         for line in fp:
             line_str = line.strip()
+            # curl/yt-dlp style exports mark HttpOnly cookies with this prefix
+            if line_str.startswith("#HttpOnly_"):
+                line_str = line_str[len("#HttpOnly_") :]
             if line_str and not line_str.startswith("#"):
                 parts = line_str.split("\t")
                 if len(parts) > 6:
                     domain, _flag, path, secure, expiration, name, value = parts[:7]
+                    host = domain.lstrip(".").lower()
+                    if host != "kodekloud.com" and not host.endswith(".kodekloud.com"):
+                        continue
                     cookie_dict = {
                         "domain": domain,
                         "path": path,
@@ -163,10 +172,15 @@ def parse_netscape_cookies(cookiefile: str | Path) -> list[dict]:
     return cookies
 
 
-def _extract_firebase_token_from_page(page) -> Optional[str]:
-    """Extract the Firebase JWT accessToken from IndexedDB in the page."""
+def _extract_firebase_tokens_from_page(page) -> Optional[dict]:
+    """Read the signed-in Firebase user from IndexedDB.
+
+    Returns ``{"id_token", "refresh_token", "expires_at", "api_key"}`` or None.
+    The refresh token is what lets the downloader renew the ID token on its own
+    for the rest of the run (and later runs) without a browser.
+    """
     try:
-        token = page.evaluate("""async () => {
+        data = page.evaluate("""async () => {
             return new Promise((resolve) => {
                 const req = indexedDB.open('firebaseLocalStorageDb');
                 req.onsuccess = (e) => {
@@ -179,14 +193,16 @@ def _extract_firebase_token_from_page(page) -> Optional[str]:
                     const store = tx.objectStore('firebaseLocalStorage');
                     const getAll = store.getAll();
                     getAll.onsuccess = () => {
-                        if (getAll.result && getAll.result.length > 0) {
-                            const val = getAll.result[0].value;
-                            if (
-                                val &&
-                                val.stsTokenManager &&
-                                val.stsTokenManager.accessToken
-                            ) {
-                                resolve(val.stsTokenManager.accessToken);
+                        for (const row of (getAll.result || [])) {
+                            const val = row && row.value;
+                            const sts = val && val.stsTokenManager;
+                            if (sts && sts.accessToken) {
+                                resolve({
+                                    id_token: sts.accessToken,
+                                    refresh_token: sts.refreshToken || null,
+                                    expiration_ms: sts.expirationTime || null,
+                                    api_key: val.apiKey || null,
+                                });
                                 return;
                             }
                         }
@@ -197,11 +213,24 @@ def _extract_firebase_token_from_page(page) -> Optional[str]:
                 req.onerror = () => resolve(null);
             });
         }""")
-        if token and isinstance(token, str) and token.startswith("ey"):
-            return token
+        if (
+            isinstance(data, dict)
+            and isinstance(data.get("id_token"), str)
+            and data["id_token"].startswith("ey")
+        ):
+            exp_ms = data.pop("expiration_ms", None)
+            if exp_ms:
+                data["expires_at"] = float(exp_ms) / 1000.0
+            return data
     except Exception as e:
         logger.debug("IndexedDB token extraction attempt: %s", e)
     return None
+
+
+def _extract_firebase_token_from_page(page) -> Optional[str]:
+    """Extract the Firebase JWT accessToken from IndexedDB in the page."""
+    tokens = _extract_firebase_tokens_from_page(page)
+    return tokens["id_token"] if tokens else None
 
 
 def _extract_session_cookie(context) -> Optional[str]:
@@ -213,13 +242,20 @@ def _extract_session_cookie(context) -> Optional[str]:
 
 
 def get_token_from_cookie_file(cookiefile: str | Path) -> Optional[str]:
-    """Exchange exported cookies (e.g. _secure-user-session) for a Firebase ID token.
+    """Exchange exported cookies for a Firebase ID token (see get_tokens_...)."""
+    tokens = get_tokens_from_cookie_file(cookiefile)
+    return tokens["id_token"] if tokens else None
+
+
+def get_tokens_from_cookie_file(cookiefile: str | Path) -> Optional[dict]:
+    """Exchange exported cookies (e.g. _secure-user-session) for Firebase tokens.
 
     Launches a lightweight headless browser, loads the cookies, navigates to
-    KodeKloud, and extracts the Firebase accessToken from IndexedDB.
+    KodeKloud, and extracts the Firebase tokens from IndexedDB.
 
     :param cookiefile: Path to the cookie file.
-    :return: The Firebase JWT token if resolved, otherwise None.
+    :return: ``{"id_token", "refresh_token", "expires_at", "api_key"}`` (the
+        last three may be missing) if resolved, otherwise None.
     """
     sp = _import_playwright()
     if sp is None:
@@ -270,15 +306,26 @@ def get_token_from_cookie_file(cookiefile: str | Path) -> Optional[str]:
             logger.debug("Page navigation: %s", e)
 
         time.sleep(2)
-        token = _extract_firebase_token_from_page(page) or intercepted_token
+        tokens = _extract_firebase_tokens_from_page(page)
         browser.close()
-        return token
+        if tokens:
+            return tokens
+        return {"id_token": intercepted_token} if intercepted_token else None
 
 
 def get_session_token_from_browser(
     port: int = CDP_PORT,
     auto_launch: bool = False,
 ) -> Optional[str]:
+    """Like :func:`get_session_tokens_from_browser` but returns only the ID token."""
+    tokens = get_session_tokens_from_browser(port=port, auto_launch=auto_launch)
+    return tokens["id_token"] if tokens else None
+
+
+def get_session_tokens_from_browser(
+    port: int = CDP_PORT,
+    auto_launch: bool = False,
+) -> Optional[dict]:
     """Extract the authentication token from a Chrome browser via CDP.
 
     Tries connecting to a running Chrome instance first. If that fails
@@ -295,7 +342,7 @@ def get_session_token_from_browser(
 
     Returns
     -------
-    The authentication token (Firebase JWT or session-cookie), or None.
+    ``{"id_token", "refresh_token"?, "expires_at"?, "api_key"?}`` or None.
     """
     sp = _import_playwright()
     if sp is None:
@@ -369,12 +416,15 @@ def get_session_token_from_browser(
 
         page.on("request", _handle_request)
 
+        def _collect() -> Optional[dict]:
+            tokens = _extract_firebase_tokens_from_page(page)
+            if tokens:
+                return tokens
+            legacy = _extract_session_cookie(context) or intercepted_token
+            return {"id_token": legacy} if legacy else None
+
         # Check existing session in page / cookies
-        token = (
-            _extract_firebase_token_from_page(page)
-            or _extract_session_cookie(context)
-            or intercepted_token
-        )
+        token = _collect()
         if token:
             logger.info("Session token found in existing browser state")
             if chrome_proc is not None:
@@ -397,11 +447,7 @@ def get_session_token_from_browser(
         time.sleep(2)
 
         # Check again after navigation
-        token = (
-            _extract_firebase_token_from_page(page)
-            or _extract_session_cookie(context)
-            or intercepted_token
-        )
+        token = _collect()
         if token:
             logger.info("Session token obtained after navigation")
             if chrome_proc is not None:
@@ -436,11 +482,7 @@ def get_session_token_from_browser(
         # Wait for the token after user sign in
         logger.info("Waiting for token...")
         for _ in range(15):  # wait up to ~30s
-            token = (
-                _extract_firebase_token_from_page(page)
-                or _extract_session_cookie(context)
-                or intercepted_token
-            )
+            token = _collect()
             if token:
                 break
             time.sleep(2)

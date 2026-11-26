@@ -75,7 +75,9 @@ ignore = [
     "S603",   # subprocess paths are from a hardcoded system list
 ]
 "tests/*" = [
+    "S105",   # allow fake test passwords/tokens
     "S106",   # allow test passwords/tokens
+    "S107",   # allow fake test token defaults
     "S108",   # allow /tmp paths in tests
     "E501",   # allow long test assertion lines
 ]

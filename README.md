@@ -112,9 +112,27 @@ This will display the FFmpeg version and build information, confirming that the 
 
 ## 🔐 Authentication
 
-You have two options to authenticate:
+KodeKloud's API takes a Firebase **ID token**, which expires after about an hour.
+The downloader renews it on its own whenever it has a **refresh token** (from an
+email/password sign-in, a cookie or browser sign-in, or the cache from an earlier
+run) or your password. That means a long `--all-paid` download keeps going after
+the first hour.
 
-### Option 1: Browser-based (recommended)
+### Option 0: Email + password (recommended for long downloads / servers)
+
+```console
+export KODEKLOUD_EMAIL=you@example.com
+kodekloud dl -o . --all-paid          # prompts for the password once
+```
+
+The password can also come from `KODEKLOUD_PASSWORD` or `-p`. It is only sent to
+Google's Firebase sign-in endpoint and is never saved. The refresh token is cached
+in `~/.cache/kodekloud-downloader/auth.json` (mode `0600`), so later runs need no
+credentials at all (`--no-auth-cache` turns this off). If KodeKloud ever requires
+reCAPTCHA for password sign-in, use Option 1 or 2 once: they store a refresh token
+too, so renewal still works.
+
+### Option 1: Browser-based
 
 ```console
 kodekloud dl --browser -o . "https://kodekloud.com/courses/..."
@@ -251,16 +269,60 @@ Options:
                                   Quality of the video to be downloaded.
   -o, --output-dir TEXT           Output directory where downloaded files will
                                   be store.
-  -c, --cookie TEXT               Cookie file exported from browser.
+  -e, --email TEXT                KodeKloud account email. Enables automatic
+                                  token renewal (env: KODEKLOUD_EMAIL).
+  -p, --password TEXT             KodeKloud account password (env:
+                                  KODEKLOUD_PASSWORD). Prompted for if --email
+                                  is given without it. Never written to disk.
+  -c, --cookie TEXT               Cookie file exported from browser. Not
+                                  needed with --browser.
   --browser                       Extract session token from running Chrome
                                   (requires playwright).
+  -t, --token TEXT                Direct Firebase JWT authentication token
+                                  (env: KODEKLOUD_TOKEN).
+  --auth-state TEXT               Where the refresh token is cached (0600) so
+                                  later runs need no credentials. Env:
+                                  KODEKLOUD_AUTH_STATE.  [default:
+                                  ~/.cache/kodekloud-
+                                  downloader/auth.json]
+  --no-auth-cache                 Do not read or write the refresh-token
+                                  cache.
   -mdc, --max-duplicate-count INTEGER
                                   If same video is downloaded this many times,
                                   then download stops
+  -s, --search TEXT               Filter course list by keyword (title,
+                                  instructor, or category).
+  -f, --filter, --category TEXT   Filter course list by category (e.g.
+                                  'Kubernetes', 'Security', 'Golden
+                                  Kubestronaut').
+  --plan TEXT                     Only list courses on these plans, comma-
+                                  separated (Free, Standard, Pro).
+  --all-paid                      Download every Standard and Pro course (Free
+                                  ones are skipped) without prompting. Combine
+                                  with -s/-f to narrow it down.
+  --dry-run                       With --all-paid: only list the courses that
+                                  would be downloaded.
   --help                          Show this message and exit.
 ```
 
 Here is an example:
+
+### 💰 Download every Standard and Pro course (skip Free)
+
+```console
+# See what would be downloaded (no login needed)
+kodekloud dl --all-paid --dry-run
+
+# Download all of them, unattended, with automatic token renewal
+kodekloud dl -o /data/kodekloud -e you@example.com --all-paid
+
+# Only part of the paid catalog
+kodekloud dl -o . -e you@example.com --all-paid -f "Kubernetes"
+```
+
+If one course fails, the rest still download, and the failed ones are listed at the end.
+Re-running skips videos and resources that are already on disk. `--plan Standard,Pro`
+applies the same plan filter to the interactive course picker.
 
 ### 🔍 Download entire course from list of available course in current folder
 

@@ -368,3 +368,54 @@ def test_select_courses_interactive_category_command():
         selected = select_courses(courses)
         assert len(selected) == 1
         assert selected[0].title == "KCSA"
+
+
+def test_download_all_resources_does_not_leak_token_to_third_parties(tmp_path: Path):
+    from kodekloud_downloader.helpers import download_all_resources
+
+    md = (
+        "[a](https://github.com/o/r/blob/main/a.pdf) "
+        "[b](https://example.com/b.zip) "
+        "[c](https://learn-api.kodekloud.com/files/c.pdf)"
+    )
+    with patch("requests.get") as mock_get:
+        mock_resp = MagicMock()
+        mock_resp.iter_content.return_value = [b"x"]
+        mock_get.return_value = mock_resp
+        download_all_resources(
+            md, tmp_path, cookie="cookies.txt", session_token="SECRET"
+        )
+
+    sent = {c.args[0]: c.kwargs.get("headers", {}) for c in mock_get.call_args_list}
+    assert sent["https://raw.githubusercontent.com/o/r/main/a.pdf"] == {}
+    assert sent["https://example.com/b.zip"] == {}
+    assert sent["https://learn-api.kodekloud.com/files/c.pdf"] == {
+        "Authorization": "Bearer SECRET"
+    }
+    # The cookie *file path* must never be sent as a Cookie header
+    assert all("Cookie" not in h for h in sent.values())
+
+
+def test_parse_token_reads_httponly_lines(tmp_path: Path):
+    f = tmp_path / "c.txt"
+    f.write_text(
+        "#HttpOnly_.kodekloud.com\tTRUE\t/\tTRUE\t0\t_secure-user-session\tv\n"
+    )
+    assert parse_token(str(f)) == "v"
+
+
+def test_filter_by_plan():
+    from kodekloud_downloader.helpers import PAID_PLANS, filter_by_plan
+
+    courses = []
+    for i, plan in enumerate(["Free", "Standard", "Pro", "Free", "standard"]):
+        c = _make_test_course(i, f"C{i}", f"c{i}", ["T"], ["Cat"])
+        c.plan = plan
+        courses.append(c)
+    assert [c.title for c in filter_by_plan(courses, PAID_PLANS)] == [
+        "C1",
+        "C2",
+        "C4",
+    ]
+    assert [c.title for c in filter_by_plan(courses, "free")] == ["C0", "C3"]
+    assert len(filter_by_plan(courses, "")) == 5

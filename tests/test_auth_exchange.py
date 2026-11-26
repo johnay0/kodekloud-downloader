@@ -53,3 +53,15 @@ def test_live_cookie_exchange_and_api_verification():
     data = resp.json()
     assert "video_url" in data, f"Response missing video_url: {data}"
     assert "vimeo.com" in data["video_url"]
+
+
+def test_parse_netscape_cookies_only_kodekloud_and_httponly(tmp_path: Path):
+    cookie_file = tmp_path / "cookies.txt"
+    cookie_file.write_text(
+        "# Netscape HTTP Cookie File\n"
+        "#HttpOnly_.kodekloud.com\tTRUE\t/\tTRUE\t0\t_secure-user-session\tsess\n"
+        ".google.com\tTRUE\t/\tTRUE\t0\tSID\tgoogle-secret\n"
+        ".evilkodekloud.com\tTRUE\t/\tTRUE\t0\tx\ty\n"
+    )
+    cookies = parse_netscape_cookies(cookie_file)
+    assert [c["name"] for c in cookies] == ["_secure-user-session"]

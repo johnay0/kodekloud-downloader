@@ -266,3 +266,46 @@ def test_download_course_global_sequential_indexing(tmp_path):
     assert "002 - Lesson 2" in captured_file_paths[1]
     assert "003 - Lesson 3" in captured_file_paths[2]
     assert "004 - Lesson 4" in captured_file_paths[3]
+
+
+def test_download_course_renews_token_on_401_and_retries(tmp_path):
+    from unittest.mock import MagicMock, patch
+
+    from kodekloud_downloader.main import download_course
+
+    lesson = MagicMock(id="l-1", title="Lesson 1", type="video")
+    module = MagicMock(id="m-1", title="Module 1", lessons=[lesson])
+    course = MagicMock(id="c-1", slug="c", title="Course", modules=[module])
+
+    auth = MagicMock()
+    tokens = iter(["old", "new"])
+    current = {"t": next(tokens)}
+    auth.get_token.side_effect = lambda: current["t"]
+
+    def refresh():
+        current["t"] = next(tokens)
+        return True
+
+    auth.force_refresh.side_effect = refresh
+
+    unauthorized = MagicMock(status_code=401)
+    ok = MagicMock(status_code=200)
+    ok.json.return_value = {"video_url": "https://player.vimeo.com/video/1"}
+
+    with patch("requests.Session") as session_cls, patch(
+        "kodekloud_downloader.main.download_video_lesson"
+    ) as dl_video:
+        session = session_cls.return_value
+        session.get.side_effect = [unauthorized, ok]
+        download_course(
+            course=course,
+            quality="720p",
+            output_dir=tmp_path,
+            max_duplicate_count=3,
+            auth=auth,
+        )
+
+    assert auth.force_refresh.call_count == 1
+    sent = [c.kwargs["headers"]["Authorization"] for c in session.get.call_args_list]
+    assert sent == ["Bearer old", "Bearer new"]
+    assert dl_video.called
