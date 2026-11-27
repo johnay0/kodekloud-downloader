@@ -134,3 +134,8 @@ KodeKloud/
 *cookie*.txt
 KodeKloud_Quiz.md
 .claude
+
+# Go build output
+/kodekloud
+/kodekloud.exe
+/dist/
