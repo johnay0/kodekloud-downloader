@@ -89,7 +89,8 @@ type Downloader struct {
 	Out       io.Writer // progress lines
 	RunVideo  VideoRunner
 
-	outMu sync.Mutex
+	outMu           sync.Mutex
+	impersonateHint sync.Once
 }
 
 func (d *Downloader) printf(format string, args ...any) {
@@ -307,8 +308,7 @@ func (d *Downloader) process(ctx context.Context, j job) error {
 		res.fail(&AccessError{fmt.Sprintf("KodeKloud returned no video for '%s' in '%s'. You are probably not enrolled, or your plan does not include this course.", j.lesson.Title, courseTitle)})
 		return nil
 	}
-	parts := strings.Split(lc.VideoURL, "/")
-	vimeo := "https://player.vimeo.com/video/" + parts[len(parts)-1]
+	vimeo := PlayerURL(lc.VideoURL)
 
 	res.mu.Lock()
 	dup := res.videos[vimeo] > d.Opt.MaxDuplicateCount
@@ -325,12 +325,23 @@ func (d *Downloader) process(ctx context.Context, j job) error {
 	}
 	start := time.Now()
 	out, err := d.RunVideo(res.ctx, vimeo, j.path)
+	if err != nil && res.ctx.Err() == nil && mergeFailed(out) && removeIntermediates(j.path) > 0 {
+		d.Log.Warn("merge failed, retrying without leftover pieces", "lesson", name)
+		out, err = d.RunVideo(res.ctx, vimeo, j.path)
+	}
 	if err != nil {
 		if res.ctx.Err() != nil {
 			return nil
 		}
 		res.Failed.Add(1)
-		d.Log.Error("video download failed", "lesson", name, "url", vimeo, "err", err, "yt-dlp", tail(out, 15))
+		if strings.Contains(string(out), "no impersonate target is available") {
+			d.impersonateHint.Do(func() {
+				d.Log.Warn("your yt-dlp cannot impersonate a browser, which Vimeo increasingly requires; " +
+					"install the standalone yt-dlp binary (github.com/yt-dlp/yt-dlp/releases, e.g. yt-dlp_linux) " +
+					"or `pip install \"yt-dlp[default,curl-cffi]\"`")
+			})
+		}
+		d.Log.Error("video download failed", "lesson", name, "url", vimeo, "video_url", lc.VideoURL, "err", err, "yt-dlp", tail(out, 15))
 		d.printf("  ✗ [%s] %s\n", j.position, name)
 		return nil
 	}
