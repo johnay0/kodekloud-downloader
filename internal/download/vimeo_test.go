@@ -27,6 +27,9 @@ func TestPlayerURL(t *testing.T) {
 		"https://vimeo.com/channels/staffpicks/123456789":           vimeoPlayer + "123456789",
 		"https://www.vimeo.com/123456789/":                          vimeoPlayer + "123456789",
 		" 123456789 ":                                               vimeoPlayer + "123456789",
+		// the same link stored twice (EC2 course, lesson 37)
+		"https://vimeo.com/906338252?share=copy\n\n\n\nhttps://vimeo.com/906338252?share=copy": vimeoPlayer + "906338252",
+		"see below\nhttps://vimeo.com/906338252":                                               vimeoPlayer + "906338252",
 		// not Vimeo, or no id: left for yt-dlp
 		"https://www.youtube.com/watch?v=abc": "https://www.youtube.com/watch?v=abc",
 		"https://vimeo.com/user/abc":          "https://vimeo.com/user/abc",

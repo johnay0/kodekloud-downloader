@@ -36,11 +36,28 @@ func allDigits(s string) bool {
 //	https://player.vimeo.com/video/123456789?h=4003d34149
 //	123456789
 //
+// Some lessons store the link more than once, separated by blank lines; the
+// first usable link wins.
+//
 // The video id is the numeric segment (the web app extracts it the same way);
 // a privacy hash is kept as ?h= because unlisted videos need it. Anything
 // that is not a Vimeo URL is returned unchanged for yt-dlp to handle.
 func PlayerURL(raw string) string {
-	raw = strings.TrimSpace(raw)
+	fields := strings.Fields(raw)
+	if len(fields) == 0 {
+		return ""
+	}
+	if len(fields) > 1 {
+		for _, f := range fields {
+			if p := onePlayerURL(f); strings.HasPrefix(p, vimeoPlayer) {
+				return p
+			}
+		}
+	}
+	return onePlayerURL(fields[0])
+}
+
+func onePlayerURL(raw string) string {
 	if allDigits(raw) {
 		return vimeoPlayer + raw
 	}
