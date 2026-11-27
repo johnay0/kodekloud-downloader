@@ -15,7 +15,7 @@ func TestDownloadKeepsQuestionOrder(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/quizzes/all":
-			// JSON object order (z, a, m) must be kept, as Python dicts do.
+			// JSON object order (z, a, m) must be kept.
 			_, _ = io.WriteString(w, `[{"name":"Docker: Basics","questions":{"z":"q3","a":"q1","m":"q2"}}]`)
 		case "/api/questions/question":
 			id := r.URL.Query().Get("id")

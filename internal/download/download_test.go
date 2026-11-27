@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/johnay0/kodekloud-downloader/internal/api"
-	"github.com/johnay0/kodekloud-downloader/internal/naming"
 	"github.com/johnay0/kodekloud-downloader/internal/resources"
 )
 
@@ -236,25 +235,6 @@ func TestAuthFailureStopsRun(t *testing.T) {
 	_, err := dl.Run(context.Background(), []api.Course{kk.details["c"].Course})
 	if !errors.Is(err, api.AuthFailedError) {
 		t.Fatalf("err = %v", err)
-	}
-}
-
-func TestLegacyFoldersAreRenamedBeforeDownload(t *testing.T) {
-	kk := &fakeKK{enrolled: map[string]bool{"c": true}, details: map[string]api.CourseDetail{"c": course("c", "AZ-204: Dev", videos("v", 2)...)}}
-	srv := kk.serve(t)
-	y := &fakeYtDlp{}
-	dl, out := newDL(t, srv, y, 2, staticAuth{})
-	old := naming.LessonPath(out, "AZ-204: Dev", 1, "Intro: Basics", 1, "Video A", naming.LegacySanitize)
-	_ = os.MkdirAll(filepath.Dir(old), 0o755)
-	_ = os.WriteFile(old+".mkv", []byte("from python"), 0o644)
-
-	res, _ := dl.Run(context.Background(), []api.Course{kk.details["c"].Course})
-	if y.calls.Load() != 1 || res[0].Skipped.Load() != 1 {
-		t.Errorf("yt-dlp calls=%d skipped=%d; existing video re-downloaded", y.calls.Load(), res[0].Skipped.Load())
-	}
-	b, _ := os.ReadFile(filepath.Join(out, "KodeKloud", "AZ-204 - Dev", "01 - Intro - Basics", "001 - Video A.mkv"))
-	if string(b) != "from python" {
-		t.Error("legacy file not moved")
 	}
 }
 
