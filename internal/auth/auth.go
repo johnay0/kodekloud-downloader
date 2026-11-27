@@ -3,9 +3,8 @@
 // It signs in with email/password via the Firebase Identity Toolkit REST API
 // and renews the ~1h ID token with the refresh token shortly before it
 // expires (or after a 401), falling back to a fresh password sign-in. The
-// refresh token is cached (0600) in the same file and format as the Python
-// version, so either can reuse the other's session. The password is never
-// written anywhere, and tokens are only sent to https://*.kodekloud.com.
+// refresh token is cached (0600) so later runs need no password. The password
+// is never written anywhere, and tokens are only sent to https://*.kodekloud.com.
 package auth
 
 import (
@@ -52,8 +51,7 @@ type Error struct{ Msg string }
 
 func (e *Error) Error() string { return e.Msg }
 
-// DefaultStatePath is ~/.cache/kodekloud-downloader/auth.json (shared with
-// the Python version).
+// DefaultStatePath is ~/.cache/kodekloud-downloader/auth.json.
 func DefaultStatePath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -120,20 +118,8 @@ func (f *Firebase) load() *state {
 	if err != nil {
 		return nil
 	}
-	var data map[string]any
-	if err := json.Unmarshal(raw, &data); err != nil {
-		f.log.Warn("ignoring unreadable auth cache", "path", f.statePath, "err", err)
-		return nil
-	}
-	// Cache files from the older johnay0 fork stored the ID token as "session_cookie".
-	if v, ok := data["session_cookie"]; ok {
-		if _, has := data["id_token"]; !has {
-			data["id_token"] = v
-		}
-	}
-	norm, _ := json.Marshal(data)
 	var s state
-	if err := json.Unmarshal(norm, &s); err != nil || s.RefreshToken == "" {
+	if err := json.Unmarshal(raw, &s); err != nil || s.RefreshToken == "" {
 		f.log.Warn("ignoring unreadable auth cache", "path", f.statePath)
 		return nil
 	}
