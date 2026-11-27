@@ -56,7 +56,7 @@ func NormalizeURL(u string) string {
 type Link struct{ URL, Title string }
 
 // Extract returns resource links from Markdown: [text](url) links that are
-// not images, then bare URLs; deduplicated in order (mirrors the Python).
+// not images, then bare URLs; deduplicated in order.
 func Extract(md string) []Link {
 	var out []Link
 	seen := map[string]bool{}
@@ -85,7 +85,7 @@ func Extract(md string) []Link {
 }
 
 // Filename picks a sanitized file name from the URL path or the link title.
-func Filename(rawURL, title string, sanitize naming.Sanitizer) string {
+func Filename(rawURL, title string) string {
 	name := ""
 	if u, err := url.Parse(rawURL); err == nil {
 		if p := strings.TrimRight(u.Path, "/"); p != "" {
@@ -100,7 +100,7 @@ func Filename(rawURL, title string, sanitize naming.Sanitizer) string {
 	default:
 		name = "resource.bin"
 	}
-	return sanitize(name, 100)
+	return naming.Sanitize(name, 100)
 }
 
 // Downloader fetches resources; safe for concurrent use. The same target
@@ -129,7 +129,7 @@ func (d *Downloader) DownloadAll(ctx context.Context, md, dir string) []string {
 	links := Extract(md)
 	var got []string
 	for _, l := range links {
-		target := filepath.Join(dir, Filename(l.URL, l.Title, naming.Sanitize))
+		target := filepath.Join(dir, Filename(l.URL, l.Title))
 		if p, err := d.download(ctx, l.URL, l.Title, dir, target); err != nil {
 			d.Log.Warn("failed to download resource", "url", l.URL, "err", err)
 		} else {
@@ -141,7 +141,6 @@ func (d *Downloader) DownloadAll(ctx context.Context, md, dir string) []string {
 
 func (d *Downloader) download(ctx context.Context, rawURL, title, dir, target string) (string, error) {
 	defer d.lock(target)()
-	naming.MovePath(filepath.Join(dir, Filename(rawURL, title, naming.LegacySanitize)), target, d.Log)
 	if fi, err := os.Stat(target); err == nil && fi.Size() > 0 {
 		return target, nil
 	}

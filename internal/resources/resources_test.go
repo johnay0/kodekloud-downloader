@@ -12,8 +12,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-
-	"github.com/johnay0/kodekloud-downloader/internal/naming"
 )
 
 var quiet = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -32,7 +30,7 @@ func TestExtract(t *testing.T) {
 	want := []Link{
 		{"https://raw.githubusercontent.com/o/r/main/deck.pdf", "Slides"},
 		{"https://example.com/lab.zip", "Code"},
-		{"https://example.com/img.pdf", ""}, // bare-URL pass sees it, like the Python
+		{"https://example.com/img.pdf", ""}, // the bare-URL pass sees it
 		{"https://example.com/manifest.yaml", ""},
 	}
 	if len(got) != len(want) {
@@ -53,13 +51,13 @@ func TestFilename(t *testing.T) {
 		{"https://x.com/", "", "resource.bin"},
 	}
 	for _, c := range cases {
-		if got := Filename(c.url, c.title, naming.Sanitize); got != c.want {
+		if got := Filename(c.url, c.title); got != c.want {
 			t.Errorf("Filename(%q, %q) = %q, want %q", c.url, c.title, got, c.want)
 		}
 	}
 }
 
-func TestDownloadAllNoTokenLeakDedupAndLegacyRename(t *testing.T) {
+func TestDownloadAllNoTokenLeakAndDedup(t *testing.T) {
 	var mu sync.Mutex
 	headers := map[string]string{}
 	var hits atomic.Int32
@@ -72,8 +70,6 @@ func TestDownloadAllNoTokenLeakDedupAndLegacyRename(t *testing.T) {
 	}))
 	defer srv.Close()
 	dir := t.TempDir()
-	// A file from an older version with the legacy name for "CI:CD|Deck.pdf".
-	_ = os.WriteFile(filepath.Join(dir, "CI_CD_Deck.pdf"), []byte("old"), 0o644)
 
 	d := &Downloader{HTTP: srv.Client(), Auth: tok("SECRET"), Log: quiet,
 		Trusted: func(u string) bool { return strings.Contains(u, "/kk/") }}
@@ -89,11 +85,11 @@ func TestDownloadAllNoTokenLeakDedupAndLegacyRename(t *testing.T) {
 	if headers["/kk/a.pdf"] != "Bearer SECRET" || headers["/other/b.zip"] != "" {
 		t.Errorf("auth headers = %v", headers)
 	}
-	if n := hits.Load(); n != 2 {
-		t.Errorf("server hits = %d, want 2 (dedup + legacy file reused)", n)
+	if n := hits.Load(); n != 3 {
+		t.Errorf("server hits = %d, want 3 (each file once)", n)
 	}
-	if b, _ := os.ReadFile(filepath.Join(dir, "CI-CD-Deck.pdf")); string(b) != "old" {
-		t.Error("legacy resource not renamed")
+	if b, _ := os.ReadFile(filepath.Join(dir, "CI-CD-Deck.pdf")); string(b) != "content of /x/CI:CD|Deck.pdf" {
+		t.Errorf("CI-CD-Deck.pdf = %q", b)
 	}
 	entries, _ := os.ReadDir(dir)
 	for _, e := range entries {

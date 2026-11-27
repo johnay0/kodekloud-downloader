@@ -193,7 +193,7 @@ func (a *app) runDL(ctx context.Context, courseURL string, f dlFlags) error {
 	}
 	ytdlp, err := a.lookPath(f.ytdlp)
 	if err != nil {
-		return fail("yt-dlp not found (%v). Install it from https://github.com/yt-dlp/yt-dlp#installation (the standalone binary needs no Python) and make sure ffmpeg is installed too", err)
+		return fail("yt-dlp not found (%v). Install it from https://github.com/yt-dlp/yt-dlp#installation (the standalone yt-dlp_linux / yt-dlp_macos / yt-dlp.exe binaries also include browser impersonation, which Vimeo needs) and make sure ffmpeg is installed too", err)
 	}
 	if _, err := a.lookPath("ffmpeg"); err != nil {
 		a.log.Warn("ffmpeg not found; yt-dlp needs it to merge video and audio")
