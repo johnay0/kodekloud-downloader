@@ -84,7 +84,7 @@ func TestPasswordSignInCachesRefreshTokenSecurely(t *testing.T) {
 	_ = json.Unmarshal(raw, &s)
 	for _, k := range []string{"refresh_token", "id_token", "expires_at", "email"} {
 		if _, ok := s[k]; !ok {
-			t.Errorf("cache missing %q (Python compatibility)", k)
+			t.Errorf("cache missing %q", k)
 		}
 	}
 	if runtime.GOOS != "windows" {
@@ -97,13 +97,13 @@ func TestPasswordSignInCachesRefreshTokenSecurely(t *testing.T) {
 	}
 }
 
-func TestRenewsBeforeExpiryUsingPythonCache(t *testing.T) {
+func TestRenewsCachedSessionBeforeExpiry(t *testing.T) {
 	fb := &fakeFirebase{}
 	fb.start(t)
 	state := filepath.Join(t.TempDir(), "auth.json")
-	// Written by the Python version: expires inside the 5 min leeway.
-	py := map[string]any{"refresh_token": "rt-old", "id_token": "id-old", "expires_at": float64(time.Now().Unix() + 60), "email": "me@x.com"}
-	b, _ := json.Marshal(py)
+	// Cached by an earlier run; expires inside the 5 min leeway.
+	cached := map[string]any{"refresh_token": "rt-old", "id_token": "id-old", "expires_at": float64(time.Now().Unix() + 60), "email": "me@x.com"}
+	b, _ := json.Marshal(cached)
 	_ = os.WriteFile(state, b, 0o600)
 
 	a := New("", "", state, quiet)
@@ -119,11 +119,11 @@ func TestRenewsBeforeExpiryUsingPythonCache(t *testing.T) {
 	}
 }
 
-func TestLegacySessionCookieCacheAndOtherAccount(t *testing.T) {
+func TestCachedSessionOfAnotherAccountIsIgnored(t *testing.T) {
 	state := filepath.Join(t.TempDir(), "auth.json")
-	_ = os.WriteFile(state, []byte(`{"refresh_token":"rt","session_cookie":"id-legacy","expires_at":9999999999,"email":"a@x.com"}`), 0o600)
-	if tok, err := New("", "", state, quiet).Token(context.Background()); err != nil || tok != "id-legacy" {
-		t.Fatalf("legacy cache: %q %v", tok, err)
+	_ = os.WriteFile(state, []byte(`{"refresh_token":"rt","id_token":"id-cached","expires_at":9999999999,"email":"a@x.com"}`), 0o600)
+	if tok, err := New("", "", state, quiet).Token(context.Background()); err != nil || tok != "id-cached" {
+		t.Fatalf("cached session: %q %v", tok, err)
 	}
 	if New("b@x.com", "", state, quiet).HasRefreshToken() {
 		t.Error("used another account's cached session")

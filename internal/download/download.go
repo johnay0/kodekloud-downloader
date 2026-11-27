@@ -185,22 +185,13 @@ func (d *Downloader) prepare(ctx context.Context, c api.Course, position string)
 			if l.Type == "video" || l.Type == "article" {
 				res.Downloadable++
 			}
-			path := naming.LessonPath(d.Opt.OutputDir, c.Title, mi+1, m.Title, gi, l.Title, naming.Sanitize)
+			path := naming.LessonPath(d.Opt.OutputDir, c.Title, mi+1, m.Title, gi, l.Title)
 			js = append(js, job{res: res, course: detail, lesson: l, path: path, position: position})
 		}
 	}
 	if res.Downloadable == 0 {
 		d.printf("  only labs/quizzes, nothing to download\n")
 		return res, nil, nil
-	}
-	// Rename folders/files from older versions before any worker touches them.
-	gi = 0
-	for mi, m := range detail.Modules {
-		for _, l := range m.Lessons {
-			gi++
-			old := naming.LessonPath(d.Opt.OutputDir, c.Title, mi+1, m.Title, gi, l.Title, naming.LegacySanitize)
-			naming.MigrateLegacyLesson(old, js[gi-1].path, d.Log)
-		}
 	}
 	d.printf("  %d downloadable lesson(s), %d worker(s)\n", res.Downloadable, d.Opt.Jobs)
 	return res, js, nil
@@ -362,7 +353,7 @@ func tail(b []byte, n int) string {
 	return strings.Join(lines, "\n")
 }
 
-// YtDlpArgs builds the yt-dlp command line (same choices as the Python version).
+// YtDlpArgs builds the yt-dlp command line.
 func (d *Downloader) YtDlpArgs(videoURL, outBase string) []string {
 	h := strings.TrimSuffix(d.Opt.Quality, "p")
 	return []string{
