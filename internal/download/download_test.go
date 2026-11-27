@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"hash/crc32"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -63,7 +65,7 @@ func (f *fakeKK) serve(t *testing.T) *httptest.Server {
 				_, _ = io.WriteString(w, `{"content":"# Notes for `+id+`"}`)
 				return
 			}
-			_, _ = io.WriteString(w, `{"video_url":"https://vimeo.com/v-`+id+`"}`)
+			_, _ = io.WriteString(w, `{"video_url":"https://vimeo.com/`+vimeoID(id)+`/abcdef1234?share=copy"}`)
 		case strings.HasPrefix(p, "/api/users_progresses/courses/"):
 			id := strings.TrimPrefix(p, "/api/users_progresses/courses/")
 			_ = json.NewEncoder(w).Encode(map[string]any{"enrolled": f.enrolled[id]})
@@ -80,6 +82,15 @@ func (f *fakeKK) serve(t *testing.T) *httptest.Server {
 	}))
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// vimeoID is the fake numeric Vimeo id of a lesson.
+func vimeoID(lessonID string) string {
+	return strconv.FormatUint(uint64(crc32.ChecksumIEEE([]byte(lessonID)))+1_000_000_000, 10)
+}
+
+func playerURL(lessonID string) string {
+	return "https://player.vimeo.com/video/" + vimeoID(lessonID) + "?h=abcdef1234"
 }
 
 func course(id, title string, lessons ...api.Lesson) api.CourseDetail {
@@ -209,7 +220,7 @@ func TestAccessDeniedFailsOnlyThatCourse(t *testing.T) {
 func TestFailedVideoIsCountedAndOthersContinue(t *testing.T) {
 	kk := &fakeKK{enrolled: map[string]bool{"c": true}, details: map[string]api.CourseDetail{"c": course("c", "C", videos("v", 3)...)}}
 	srv := kk.serve(t)
-	y := &fakeYtDlp{fail: map[string]bool{"https://player.vimeo.com/video/v-vb": true}}
+	y := &fakeYtDlp{fail: map[string]bool{playerURL("vb"): true}}
 	dl, _ := newDL(t, srv, y, 2, staticAuth{})
 	res, _ := dl.Run(context.Background(), []api.Course{kk.details["c"].Course})
 	if res[0].Failed.Load() != 1 || res[0].Downloaded.Load() != 2 {
