@@ -22,6 +22,38 @@ Please read the following disclaimer carefully before using the Downloader CLI T
 
 ---
 
+## ⚡ Go version (beta): parallel downloads, single binary
+
+A Go rewrite lives in `cmd/` and `internal/`. It works the same way as the Python
+tool, with the same commands, flags, environment variables, folder layout and session
+cache, but downloads several lessons at once:
+
+```console
+# prebuilt binaries: see the GitHub releases page, or build it yourself:
+go install github.com/johnay0/kodekloud-downloader/cmd/kodekloud@latest
+
+kodekloud dl -o /data/kodekloud -e you@example.com --all-paid -j 6
+```
+
+- **Dependencies:** it needs [`yt-dlp`](https://github.com/yt-dlp/yt-dlp#installation)
+  (the standalone binary is fine, no Python required) and `ffmpeg` on your `PATH`.
+  Videos are still fetched by yt-dlp; Go handles sign-in, the catalog, enrollment,
+  file naming, attachments and the parallel worker pool.
+- **Parallelism:** `-j/--jobs` is how many lessons download at once (default 4).
+  `--fragments` is how many pieces of each video yt-dlp fetches at once (default 8).
+  The old tool downloaded one lesson at a time. That, not Python itself, is why a full
+  run took days. More jobs help until your bandwidth is used up, so start with 4–8.
+- **Picks up where Python left off:** it uses the same folder and file names (checked
+  against every lesson in the live catalog). It also renames the old underscore names
+  (`AZ-204_ …`), skips videos already on disk without any network calls, and reuses the
+  saved login in `~/.cache/kodekloud-downloader/auth.json`.
+- **Failures:** a course your plan doesn't include fails on its own; the rest keep going.
+  Authentication problems stop the run cleanly, and so does Ctrl-C. Partial videos
+  resume on the next run.
+- **Quizzes:** `dl-quiz` is ported, but KodeKloud appears to have retired its public quiz
+  backend (`mcq-backend-main.kodekloud.com` no longer resolves), so it currently fails in
+  both versions.
+
 ## Prerequisites
 
 - A KodeKloud account with email/password sign-in and a plan that includes the
