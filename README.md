@@ -271,7 +271,13 @@ kodekloud dl -o . -e you@example.com --all-paid -f "Kubernetes"
 ```
 
 If one course fails, the rest still download, and the failed ones are listed at the end.
-Re-running skips videos and resources that are already on disk. `--plan Standard,Pro`
+Courses made only of interactive labs (about 9 "Learn By Doing" courses) have nothing to
+download; they are listed as skipped instead of creating empty folders.
+
+Re-running is cheap and safe. Videos already on disk are skipped right away (no API
+or Vimeo calls). Folders and files from older versions, which turned `:`, `/` and `|`
+into `_` (e.g. `AZ-204_ Developing…`), are renamed to the readable names
+(`AZ-204 - Developing…`) instead of being downloaded again. `--plan Standard,Pro`
 applies the same plan filter to the interactive course picker.
 
 ### 🔍 Download entire course from list of available course in current folder

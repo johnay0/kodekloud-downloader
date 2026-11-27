@@ -1,7 +1,7 @@
 import logging
 from collections import defaultdict
 from pathlib import Path
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 
 import markdownify
 import requests
@@ -13,6 +13,8 @@ from kodekloud_downloader.helpers import (
     download_all_resources,
     download_video,
     is_normal_content,
+    legacy_sanitize_filename,
+    move_legacy_path,
     sanitize_filename,
 )
 from kodekloud_downloader.models.course import CourseDetail
@@ -23,6 +25,9 @@ from kodekloud_downloader.models.quiz import Quiz
 logger = logging.getLogger(__name__)
 
 API_BASE = "https://learn-api.kodekloud.com/api"
+
+
+DOWNLOADABLE_LESSON_TYPES = ("video", "article")
 
 
 class EnrollmentError(Exception):
@@ -116,7 +121,7 @@ def download_course(
     max_duplicate_count: int,
     auth: AuthProvider,
     auto_enroll: bool = True,
-) -> None:
+) -> int:
     """
     Download a course from KodeKloud.
 
@@ -127,6 +132,8 @@ def download_course(
         than this many times (a sign of missing access)
     :param auth: Self-renewing auth provider (see kodekloud_downloader.auth)
     :param auto_enroll: Enroll in the course first if not enrolled yet
+    :return: Number of downloadable (video/article) lessons in the course;
+        0 means it only has labs/quizzes, which cannot be downloaded
     :raises EnrollmentError: If KodeKloud denies access to the course
     """
     session = requests.Session()
@@ -140,12 +147,24 @@ def download_course(
         fetch_course_detail(course.slug) if isinstance(course, Course) else course
     )
 
+    downloadable = sum(
+        1
+        for module in course_detail.modules
+        for lesson in module.lessons
+        if lesson.type in DOWNLOADABLE_LESSON_TYPES
+    )
+    if not downloadable:
+        logger.info(
+            "%s only has labs/quizzes; nothing to download.", course_detail.title
+        )
+        return 0
+
     downloaded_videos: defaultdict = defaultdict(int)
     global_lesson_index = 0
     for module_index, module in enumerate(course_detail.modules, start=1):
         for lesson in module.lessons:
             global_lesson_index += 1
-            file_path = create_file_path(
+            path_args = (
                 output_dir,
                 course.title,
                 module_index,
@@ -153,8 +172,16 @@ def download_course(
                 global_lesson_index,
                 lesson.title,
             )
+            file_path = create_file_path(*path_args)
+            migrate_legacy_lesson(
+                create_file_path(*path_args, sanitize=legacy_sanitize_filename),
+                file_path,
+            )
 
             if lesson.type == "video":
+                if _video_already_downloaded(file_path):
+                    logger.info(f"Already downloaded, skipping: {file_path.name}")
+                    continue
                 url = f"https://learn-api.kodekloud.com/api/lessons/{lesson.id}"
 
                 try:
@@ -210,6 +237,43 @@ def download_course(
                     course_id=course.id,
                     auth=auth,
                 )
+    return downloadable
+
+
+_VIDEO_EXTENSIONS = (".mkv", ".mp4", ".webm")
+
+
+def _video_already_downloaded(file_path: Path) -> bool:
+    """True if a finished video for this lesson exists (yt-dlp's final file).
+
+    Lets re-runs skip the lesson API call and yt-dlp's per-video Vimeo
+    lookup entirely. Partial downloads (``.part``) don't count.
+    """
+    return any(
+        (file_path.parent / (file_path.name + ext)).is_file()
+        for ext in _VIDEO_EXTENSIONS
+    )
+
+
+def migrate_legacy_lesson(old: Path, new: Path) -> None:
+    """Rename an earlier download's course/module folders and lesson files.
+
+    Older versions replaced ``:``, ``/``, ``|`` etc. with ``_``. When a
+    lesson's old path differs from its new one, move the course folder, the
+    module folder and every ``<old lesson name>.*`` file (video, subtitles,
+    notes) to the new names, so nothing is downloaded twice.
+    """
+    if old == new:
+        return
+    course_dir, module_dir = new.parents[1], new.parent
+    move_legacy_path(old.parents[1], course_dir)
+    move_legacy_path(course_dir / old.parent.name, module_dir)
+    if old.name == new.name or not module_dir.is_dir():
+        return
+    prefix = old.name + "."
+    for f in list(module_dir.iterdir()):
+        if f.name.startswith(prefix):
+            move_legacy_path(f, module_dir / (new.name + f.name[len(old.name) :]))
 
 
 _AUTH_FAILED_MSG = (
@@ -281,36 +345,64 @@ def ensure_enrolled(
     that: check ``users_progresses/courses/{id}`` and, if ``enrolled`` is
     not true, ``POST users_progresses/enroll_course``.
 
-    :return: True if this call enrolled you, False if you already were (or
-        enrolling failed, which is only logged: a real lack of access then
-        surfaces as an EnrollmentError on the first lesson).
+    The web app's HTTP client snake_cases request bodies (axios interceptor
+    running ``decamelizeKeys``), so the API expects ``course_id``, not the
+    ``courseId`` seen in the frontend source.
+
+    :return: True if this call enrolled you (verified by re-reading the
+        status), False otherwise. Failures are only logged: a real lack of
+        access then surfaces as an EnrollmentError on the first lesson.
     """
-    progress_url = f"{API_BASE}/users_progresses/courses/{course_id}"
-    try:
-        resp = _api_request(session, "get", progress_url, auth)
-        if resp.status_code == 200 and resp.json().get("enrolled") is True:
-            logger.debug("Already enrolled in %s", course_title)
-            return False
-    except (requests.RequestException, ValueError, AttributeError) as ex:
-        logger.debug("Could not read enrollment status of %s: %s", course_title, ex)
+    if _enrollment_status(session, course_id, auth) is True:
+        logger.debug("Already enrolled in %s", course_title)
+        return False
 
     enroll_url = f"{API_BASE}/users_progresses/enroll_course"
     try:
         resp = _api_request(
-            session, "post", enroll_url, auth, json={"courseId": course_id}
+            session, "post", enroll_url, auth, json={"course_id": course_id}
         )
     except requests.RequestException as ex:
         logger.warning("Could not enroll in %s: %s", course_title, ex)
         return False
-    if resp.ok:
+    if not resp.ok:
+        logger.warning(
+            "KodeKloud did not enroll you in %s (%s); trying to download anyway.",
+            course_title,
+            _error_message(resp),
+        )
+        return False
+
+    status = _enrollment_status(session, course_id, auth)
+    if status is True:
         logger.info("Enrolled in %s", course_title)
         return True
     logger.warning(
-        "KodeKloud did not enroll you in %s (%s); trying to download anyway.",
+        "Enroll request for %s was accepted (%s) but KodeKloud %s; "
+        "trying to download anyway.",
         course_title,
         _error_message(resp),
+        "still reports you as not enrolled"
+        if status is False
+        else "did not confirm it",
     )
     return False
+
+
+def _enrollment_status(
+    session: requests.Session, course_id: str, auth: AuthProvider
+) -> Optional[bool]:
+    """``enrolled`` from users_progresses/courses/{id}; None if unknown."""
+    url = f"{API_BASE}/users_progresses/courses/{course_id}"
+    try:
+        resp = _api_request(session, "get", url, auth)
+        if resp.status_code != 200:
+            return None
+        enrolled = resp.json().get("enrolled")
+    except (requests.RequestException, ValueError, AttributeError) as ex:
+        logger.debug("Could not read enrollment status of %s: %s", course_id, ex)
+        return None
+    return enrolled if isinstance(enrolled, bool) else None
 
 
 # Maximum safe path length (Windows MAX_PATH is 260, leave room for
@@ -337,6 +429,7 @@ def create_file_path(
     module_name: str,
     lesson_index: int,
     lesson_name: str,
+    sanitize: Callable[..., str] = sanitize_filename,
 ) -> Path:
     """
     Create a file path for a lesson, ensuring it stays within safe
@@ -348,13 +441,15 @@ def create_file_path(
     :param module_name: The module name
     :param lesson_index: The lesson index
     :param lesson_name: The lesson name
+    :param sanitize: Component sanitizer (legacy_sanitize_filename finds
+        paths written by older versions)
     :return: The created file path
     """
     parts = [
         "KodeKloud",
-        sanitize_filename(course_name, max_length=80),
-        sanitize_filename(f"{module_index:02d} - {module_name}", max_length=80),
-        sanitize_filename(f"{lesson_index:03d} - {lesson_name}", max_length=80),
+        sanitize(course_name, max_length=80),
+        sanitize(f"{module_index:02d} - {module_name}", max_length=80),
+        sanitize(f"{lesson_index:03d} - {lesson_name}", max_length=80),
     ]
 
     # Build the base path and check total length

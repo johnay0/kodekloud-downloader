@@ -4,7 +4,7 @@ import string
 import urllib.parse
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, List, Optional, Sequence, Set, Tuple, Union, cast
+from typing import Any, Callable, List, Optional, Sequence, Set, Tuple, Union, cast
 
 import prettytable
 import requests
@@ -304,29 +304,82 @@ _WINDOWS_RESERVED_NAMES = {
 }
 
 
+# Readable stand-ins for characters Windows forbids in file names, applied in
+# order: "AZ-204: Developing" -> "AZ-204 - Developing", "CI/CD" -> "CI-CD",
+# "SWARM | SERVICES" -> "SWARM - SERVICES".
+_READABLE_REPLACEMENTS = (
+    (": ", " - "),
+    (":", "-"),
+    ("/", "-"),
+    ("\\", "-"),
+    ("|", "-"),
+    ('"', "'"),
+    ("<", ""),
+    (">", ""),
+    ("?", ""),
+    ("*", ""),
+)
+
+
+def _finish_filename(safe: str, max_length: int) -> str:
+    safe = safe.strip(". ")
+    safe = safe[:max_length].rstrip(". ")
+    if not safe or safe.lower().rstrip(".") in _WINDOWS_RESERVED_NAMES:
+        safe = "_"
+    return safe
+
+
 def sanitize_filename(name: str, max_length: int = 100) -> str:
     """Sanitize a string for use as a filename component.
 
-    Removes or replaces characters that are invalid across platforms,
-    trims whitespace, and truncates to ``max_length``.
+    Characters that are invalid on Windows are replaced with readable
+    stand-ins (see ``_READABLE_REPLACEMENTS``) instead of underscores,
+    control characters are dropped, runs of spaces are collapsed, and the
+    result is trimmed and truncated to ``max_length``.
 
     :param name: The raw string to sanitize.
     :param max_length: Maximum allowed length (default 100).
     :return: A safe filename string.
     """
-    # Replace invalid characters with a safe alternative
+    safe = "".join(c for c in name if c >= " ")
+    for bad, good in _READABLE_REPLACEMENTS:
+        safe = safe.replace(bad, good)
+    safe = re.sub(r" {2,}", " ", safe)
+    return _finish_filename(safe, max_length)
+
+
+def legacy_sanitize_filename(name: str, max_length: int = 100) -> str:
+    """The pre-2026-11 sanitizer (invalid characters -> ``_``).
+
+    Only used to find folders/files from earlier downloads so they can be
+    renamed to the new, readable names instead of being downloaded again.
+    """
     safe = "".join("_" if c in _WINDOWS_RESERVED_CHARS else c for c in name)
-    # Collapse multiple underscores
     while "__" in safe:
         safe = safe.replace("__", "_")
-    # Trim leading/trailing whitespace and dots
-    safe = safe.strip(". ")
-    # Truncate
-    safe = safe[:max_length].rstrip(". ")
-    # Handle empty result or reserved names
-    if not safe or safe.lower().rstrip(".") in _WINDOWS_RESERVED_NAMES:
-        safe = "_"
-    return safe
+    return _finish_filename(safe, max_length)
+
+
+def move_legacy_path(old: Path, new: Path) -> None:
+    """Rename ``old`` to ``new``; if both are directories, merge them.
+
+    Never overwrites: entries that already exist under ``new`` are left in
+    ``old``. An emptied ``old`` directory is removed.
+    """
+    if old == new or not old.exists():
+        return
+    if not new.exists():
+        new.parent.mkdir(parents=True, exist_ok=True)
+        old.rename(new)
+        logger.info(f"Renamed {old.name!r} -> {new.name!r}")
+        return
+    if old.is_dir() and new.is_dir():
+        for child in list(old.iterdir()):
+            move_legacy_path(child, new / child.name)
+        try:
+            old.rmdir()
+        except OSError:
+            logger.warning(f"Could not fully merge {old} into {new}; left behind.")
 
 
 def normalize_name(name: str) -> str:
@@ -477,7 +530,9 @@ def extract_resource_urls(content: Any) -> List[Tuple[str, str]]:
     return results
 
 
-def _resolve_resource_filename(url: str, title: str = "") -> str:
+def _resolve_resource_filename(
+    url: str, title: str = "", sanitize: Callable[[str], str] = sanitize_filename
+) -> str:
     """Resolve a sanitized filename from a URL and an optional link title."""
     parsed = urllib.parse.urlparse(url)
     url_filename = Path(urllib.parse.unquote(parsed.path)).name
@@ -491,7 +546,7 @@ def _resolve_resource_filename(url: str, title: str = "") -> str:
     else:
         target_name = "resource.bin"
 
-    return sanitize_filename(target_name)
+    return sanitize(target_name)
 
 
 def download_all_resources(
@@ -524,6 +579,11 @@ def download_all_resources(
         url = normalize_resource_url(url)
         file_name = _resolve_resource_filename(url, title)
         target_path = download_path / file_name
+        move_legacy_path(
+            download_path
+            / _resolve_resource_filename(url, title, legacy_sanitize_filename),
+            target_path,
+        )
 
         if target_path.exists() and target_path.stat().st_size > 0:
             logger.info(f"Resource {file_name} already exists, skipping...")

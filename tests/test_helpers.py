@@ -400,3 +400,69 @@ def test_filter_by_plan():
     ]
     assert [c.title for c in filter_by_plan(courses, "free")] == ["C0", "C3"]
     assert len(filter_by_plan(courses, "")) == 5
+
+
+@pytest.mark.parametrize(
+    "title,expected",
+    [
+        (
+            "AZ-204: Developing Solutions for Microsoft Azure",
+            "AZ-204 - Developing Solutions for Microsoft Azure",
+        ),
+        ("AWS CodePipeline (CI/CD Pipeline)", "AWS CodePipeline (CI-CD Pipeline)"),
+        (
+            "Docker - SWARM | SERVICES | STACKS - Hands-on",
+            "Docker - SWARM - SERVICES - STACKS - Hands-on",
+        ),
+        (
+            "GitLab CI/CD: Architecting, Deploying, and Optimizing Pipelines",
+            "GitLab CI-CD - Architecting, Deploying, and Optimizing Pipelines",
+        ),
+        ("What is Docker?", "What is Docker"),
+        ('Say "hi"', "Say 'hi'"),
+        ("keep_my_underscores", "keep_my_underscores"),
+    ],
+)
+def test_sanitize_filename_is_readable(title, expected):
+    assert sanitize_filename(title, max_length=80) == expected
+    assert "_" not in sanitize_filename(title.replace("_", ""), max_length=80)
+
+
+@pytest.mark.parametrize(
+    "title,old_folder",
+    [
+        (
+            "AZ-204: Developing Solutions for Microsoft Azure",
+            "AZ-204_ Developing Solutions for Microsoft Azure",
+        ),
+        (
+            "Docker - SWARM | SERVICES | STACKS - Hands-on",
+            "Docker - SWARM _ SERVICES _ STACKS - Hands-on",
+        ),
+        (
+            "GitLab CI/CD: Architecting, Deploying, and Optimizing Pipelines",
+            "GitLab CI_CD_ Architecting, Deploying, and Optimizing Pipelines",
+        ),
+        (
+            "Enhancing Soft Skills for DevOps Engineers: Essential Non-Technical "
+            "Skills to Thrive",
+            "Enhancing Soft Skills for DevOps Engineers_ Essential Non-Technical "
+            "Skills to Th",
+        ),
+    ],
+)
+def test_legacy_sanitize_matches_existing_folder_names(title, old_folder):
+    from kodekloud_downloader.helpers import legacy_sanitize_filename
+
+    assert legacy_sanitize_filename(title, max_length=80) == old_folder
+
+
+def test_download_all_resources_renames_legacy_resource_file(tmp_path: Path):
+    md = "[Slides](https://example.com/files/CI%3ACD%7CDeck.pdf)"  # CI:CD|Deck.pdf
+    old = tmp_path / "CI_CD_Deck.pdf"
+    old.write_text("already here")
+    with patch("requests.get") as mock_get:
+        download_all_resources(md, tmp_path)
+    assert not mock_get.called  # existing file reused, not re-downloaded
+    assert not old.exists()
+    assert (tmp_path / "CI-CD-Deck.pdf").read_text() == "already here"
