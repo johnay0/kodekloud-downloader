@@ -236,3 +236,16 @@ def test_cli_plan_filter_applies_to_interactive_list(fake_auth):
         result = runner.invoke(kodekloud, ["dl", "--plan", "pro"])
     assert result.exit_code == 0, result.output
     assert [c.title for c in sel.call_args.args[0]] == ["ProOne"]
+
+
+def test_cli_all_paid_reports_lab_only_courses(fake_auth):
+    runner = CliRunner()
+    courses = [_course("LabOnly", "Standard"), _course("Videos", "Pro")]
+    with patch("kodekloud_downloader.cli._build_auth", return_value=fake_auth), patch(
+        "kodekloud_downloader.cli.collect_all_courses", return_value=courses
+    ), patch("kodekloud_downloader.cli.download_course", side_effect=[0, 12]):
+        result = runner.invoke(kodekloud, ["dl", "--all-paid"])
+    assert result.exit_code == 0, result.output
+    assert "Done: 1/2 course(s) downloaded." in result.output
+    assert "Skipped 1 lab-only course(s)" in result.output
+    assert "LabOnly" in result.output.split("Skipped", 1)[1]

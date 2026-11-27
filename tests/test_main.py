@@ -333,13 +333,17 @@ def test_ensure_enrolled_enrolls_when_not_enrolled():
     from kodekloud_downloader.main import ensure_enrolled
 
     session = MagicMock()
-    session.get.return_value = _resp(200, {"enrolled": False})
+    session.get.side_effect = [
+        _resp(200, {"enrolled": False}),
+        _resp(200, {"enrolled": True}),  # re-check after enrolling
+    ]
     session.post.return_value = _resp(200, {})
 
     assert ensure_enrolled(session, "c-1", "Course", FakeAuth("tok")) is True
     assert session.get.call_args.args[0] == PROGRESS_URL
     assert session.post.call_args.args[0] == ENROLL_URL
-    assert session.post.call_args.kwargs["json"] == {"courseId": "c-1"}
+    # The web app's axios interceptor snake_cases bodies: course_id, not courseId
+    assert session.post.call_args.kwargs["json"] == {"course_id": "c-1"}
     assert session.post.call_args.kwargs["headers"] == {"Authorization": "Bearer tok"}
 
 
@@ -426,3 +430,117 @@ def test_download_course_403_raises_enrollment_error(tmp_path):
                 auth=FakeAuth(),
                 auto_enroll=False,
             )
+
+
+def test_ensure_enrolled_reports_false_when_not_confirmed(caplog):
+    from kodekloud_downloader.main import ensure_enrolled
+
+    session = MagicMock()
+    session.get.return_value = _resp(200, {"enrolled": False})
+    session.post.return_value = _resp(200, {})
+
+    assert ensure_enrolled(session, "c-1", "Course", FakeAuth()) is False
+    assert "still reports you as not enrolled" in caplog.text
+
+
+def test_download_course_lab_only_returns_zero_and_downloads_nothing(tmp_path):
+    from kodekloud_downloader.main import download_course
+
+    labs = [MagicMock(id=f"l{i}", title=f"Lab {i}", type="lab") for i in range(3)]
+    module = MagicMock(id="m", title="Labs", lessons=labs)
+    course = MagicMock(id="c", slug="c", title="Labs Only", modules=[module])
+    with patch("requests.Session"), patch(
+        "kodekloud_downloader.main.download_resource_lesson"
+    ) as res:
+        n = download_course(
+            course=course,
+            quality="720p",
+            output_dir=tmp_path,
+            max_duplicate_count=3,
+            auth=FakeAuth(),
+            auto_enroll=False,
+        )
+    assert n == 0
+    assert not res.called
+    assert not (tmp_path / "KodeKloud").exists()
+
+
+def test_migrate_legacy_lesson_renames_folders_and_files(tmp_path):
+    from kodekloud_downloader.helpers import legacy_sanitize_filename
+    from kodekloud_downloader.main import migrate_legacy_lesson
+
+    args = (tmp_path, "AZ-204: Dev", 1, "Intro: Basics", 1, "What is CI/CD?")
+    old = create_file_path(*args, sanitize=legacy_sanitize_filename)
+    new = create_file_path(*args)
+    assert old.parent.name == "01 - Intro_ Basics"
+    assert new.parent.name == "01 - Intro - Basics"
+
+    old.parent.mkdir(parents=True)
+    (old.parent / (old.name + ".mkv")).write_text("video")
+    (old.parent / (old.name + ".en.vtt")).write_text("subs")
+    (old.parent / "slides.pdf").write_text("pdf")
+    other = old.parent / "002 - Other lesson.mkv"
+    other.write_text("other")
+
+    migrate_legacy_lesson(old, new)
+
+    assert not old.parents[1].exists()
+    assert new.parents[1].name == "AZ-204 - Dev"
+    assert (new.parent / "001 - What is CI-CD.mkv").read_text() == "video"
+    assert (new.parent / "001 - What is CI-CD.en.vtt").read_text() == "subs"
+    assert (new.parent / "slides.pdf").exists()
+    assert (new.parent / "002 - Other lesson.mkv").exists()
+
+
+def test_migrate_legacy_lesson_merges_into_existing_new_folder(tmp_path):
+    from kodekloud_downloader.helpers import legacy_sanitize_filename
+    from kodekloud_downloader.main import migrate_legacy_lesson
+
+    args = (tmp_path, "A: B", 1, "M", 1, "L")
+    old = create_file_path(*args, sanitize=legacy_sanitize_filename)
+    new = create_file_path(*args)
+    old.parent.mkdir(parents=True)
+    (old.parent / "L1.mkv").write_text("old")
+    (old.parent / "L2.mkv").write_text("old-dup")
+    new.parent.mkdir(parents=True)
+    (new.parent / "L2.mkv").write_text("new")
+
+    migrate_legacy_lesson(old, new)
+
+    assert (new.parent / "L1.mkv").read_text() == "old"
+    assert (new.parent / "L2.mkv").read_text() == "new"  # never overwritten
+    assert (old.parent / "L2.mkv").exists()  # conflict left behind, not lost
+
+
+def test_download_course_skips_videos_already_on_disk(tmp_path):
+    from kodekloud_downloader.main import download_course
+
+    lessons = [
+        MagicMock(id="l1", title="Done", type="video"),
+        MagicMock(id="l2", title="Partial", type="video"),
+    ]
+    module = MagicMock(id="m", title="M", lessons=lessons)
+    course = MagicMock(id="c", slug="c", title="C", modules=[module])
+    done = create_file_path(tmp_path, "C", 1, "M", 1, "Done")
+    done.parent.mkdir(parents=True)
+    (done.parent / (done.name + ".mkv")).write_text("x")
+    partial = create_file_path(tmp_path, "C", 1, "M", 2, "Partial")
+    (partial.parent / (partial.name + ".mkv.part")).write_text("x")
+
+    ok = _resp(200, {"video_url": "https://vimeo.com/2"})
+    with patch("requests.Session") as session_cls, patch(
+        "kodekloud_downloader.main.download_video_lesson"
+    ) as dl:
+        session_cls.return_value.get.return_value = ok
+        download_course(
+            course=course,
+            quality="720p",
+            output_dir=tmp_path,
+            max_duplicate_count=3,
+            auth=FakeAuth(),
+            auto_enroll=False,
+        )
+    urls = [c.kwargs.get("params") for c in session_cls.return_value.get.call_args_list]
+    assert len(urls) == 1  # only the partial lesson hit the API
+    assert dl.call_count == 1
+    assert dl.call_args.args[1] == partial

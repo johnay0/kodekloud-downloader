@@ -260,16 +260,26 @@ def _run_downloads(
     if all_paid:
         paid = _list_paid_courses(search, category_filter)
         failed: List[str] = []
+        lab_only: List[str] = []
         for i, course in enumerate(paid, start=1):
             click.echo(f"\n[{i}/{len(paid)}] {course.title} ({course.plan})")
             try:
-                download_course(course=course, **common)
+                if download_course(course=course, **common) == 0:
+                    lab_only.append(course.title)
             except AuthError:
                 raise
             except Exception as e:  # keep going: one broken course != dead dump
                 logging.error("Failed to download %s: %s", course.title, e)
                 failed.append(f"{course.title}: {e}")
-        click.echo(f"\nDone: {len(paid) - len(failed)}/{len(paid)} course(s).")
+        done = len(paid) - len(failed) - len(lab_only)
+        click.echo(f"\nDone: {done}/{len(paid)} course(s) downloaded.")
+        if lab_only:
+            click.echo(
+                f"Skipped {len(lab_only)} lab-only course(s) "
+                "(interactive labs only, nothing to download):"
+            )
+            for title in lab_only:
+                click.echo(f"  - {title}")
         if failed:
             click.echo("Failed (re-run to retry, finished files are skipped):")
             for line in failed:
